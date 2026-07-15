@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#160c0b" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt:; script-src 'self' rwt:; style-src 'self' rwt:; img-src 'self' rwt: data:; connect-src 'none'; media-src 'none';" />
+    <title>凛冬督学局 · 休息券</title>
+    <link rel="stylesheet" href="./break-prompt.css" />
+  </head>
+  <body data-kind="earned">
+    <main class="prompt" aria-labelledby="prompt-title">
+      <header class="prompt-header">
+        <span class="eyebrow">凛冬督学局</span>
+        <span id="credit-count" class="credit-count">休息券 × 0</span>
+      </header>
+
+      <section id="earned-view" class="prompt-view">
+        <h1 id="prompt-title">获得一张休息券</h1>
+        <p>可休息 2 分钟，稍后使用也可以。</p>
+        <div class="prompt-actions">
+          <button id="start-rest" class="button primary" type="button">立即休息</button>
+          <button id="bank-rest" class="button secondary" type="button">稍后再用</button>
+        </div>
+      </section>
+
+      <section id="resting-view" class="prompt-view resting-view" aria-live="polite" hidden>
+        <h1>休息中</h1>
+        <output id="rest-countdown" class="countdown" aria-label="休息剩余时间">02:00</output>
+        <p>倒计时结束后自动继续。</p>
+      </section>
+    </main>
+
+    <script src="./break-prompt.js"></script>
+  </body>
+</html>

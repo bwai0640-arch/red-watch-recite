@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#160c0b" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
+    <title>凛冬督学局</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="scene-mode" data-window-mode="scene" data-vad-state="stopped">
+    <header id="window-titlebar" class="window-titlebar" aria-label="窗口标题栏">
+      <div class="window-title">凛冬督学局</div>
+      <div class="window-controls" aria-label="窗口控制">
+        <button id="window-minimize-button" class="window-control" type="button" aria-label="最小化窗口" title="最小化">
+          <i class="window-glyph minimize" aria-hidden="true"></i>
+        </button>
+        <button id="window-maximize-button" class="window-control" type="button" aria-label="最大化窗口" title="最大化">
+          <i class="window-glyph maximize" aria-hidden="true"></i>
+        </button>
+        <button id="window-close-button" class="window-control close" type="button" aria-label="隐藏到后台" title="隐藏到后台">
+          <i class="window-glyph close" aria-hidden="true"></i>
+        </button>
+      </div>
+    </header>
+
+    <section id="study-scene" class="study-scene" aria-label="督学动画场景">
+      <canvas id="study-scene-canvas"></canvas>
+      <p id="study-scene-status">正在准备督学场景…</p>
+      <div class="scene-shade" aria-hidden="true"></div>
+    </section>
+
+    <section id="inline-alert" class="inline-alert" role="alertdialog" aria-modal="true" aria-labelledby="inline-alert-title" hidden>
+      <div class="inline-alert-top">
+        <h2 id="inline-alert-title">请立即回到学习状态</h2>
+        <p id="inline-alert-message" class="alert-message"></p>
+      </div>
+      <div class="inline-alert-bottom">
+        <div class="alert-actions">
+          <button id="inline-alert-dismiss" class="button primary">结束预览</button>
+          <button id="inline-alert-stop" class="button secondary">结束本次学习</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="speaker-enrollment" class="speaker-enrollment" role="dialog" aria-modal="true" aria-labelledby="speaker-enrollment-title" hidden>
+      <div class="enrollment-top">
+        <h2 id="speaker-enrollment-title">录入本人声音</h2>
+        <p id="speaker-enrollment-status">请用平时背书的麦克风连续朗读 24 秒。</p>
+      </div>
+      <div class="enrollment-bottom">
+        <div class="enrollment-progress" aria-live="polite">
+          <span id="enrollment-mic-state">麦克风：准备就绪</span>
+        </div>
+        <div class="enrollment-actions">
+          <button id="enrollment-mic-button" class="button primary">开始 24 秒录入</button>
+          <button id="enrollment-cancel-button" class="button secondary">取消</button>
+        </div>
+        <p class="enrollment-privacy">麦克风声音不上传、不保存；本机只保存加密声纹。</p>
+      </div>
+    </section>
+
+    <p id="praise-caption" class="praise-caption" role="status" aria-live="polite" hidden></p>
+
+    <main class="shell">
+      <header class="masthead">
+        <div class="masthead-copy">
+          <h1>凛冬督学局 <span id="mode-title">· 背书模式</span></h1>
+          <p class="creator-credit">原作：叛逆蓝牙 · 二创：眼泪斷了线</p>
+        </div>
+        <div class="mode-switch" role="group" aria-label="学习模式">
+          <button id="recite-mode-button" class="mode-button active" type="button" aria-pressed="true">背书</button>
+          <button id="study-mode-button" class="mode-button" type="button" aria-pressed="false">自习</button>
+        </div>
+      </header>
+
+      <section class="control-panel" aria-label="学习控制">
+        <div class="timer-block">
+          <p id="session-label">本次背书</p>
+          <output id="timer" aria-live="polite">00:00</output>
+          <span id="session-state" class="state idle">待命</span>
+        </div>
+        <div class="actions">
+          <button id="start-button" class="button primary" disabled>正在准备场景…</button>
+          <button id="stop-button" class="button secondary" disabled>结束本次背书</button>
+          <button id="break-button" class="button secondary" disabled>休息（0）</button>
+          <button id="background-button" class="button secondary" disabled>隐藏到后台</button>
+          <button id="controls-button" class="button secondary">展开检测面板</button>
+          <button id="exit-button" class="button secondary">退出程序</button>
+        </div>
+        <div class="live-voice-strip" aria-live="polite">
+          <div class="live-voice-copy">
+            <span id="live-voice-state" class="chip">未检测</span>
+            <strong id="live-voice-title">本人出声检测</strong>
+            <span id="live-voice-duration">等待开始</span>
+          </div>
+          <div id="live-meter" class="meter compact-meter" role="meter" aria-label="实时麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div id="live-volume-bar" class="volume-bar"></div>
+            <i id="live-volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="粗调检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键粗调检测门槛"></i>
+          </div>
+        </div>
+      </section>
+
+      <section class="grid voice-grid">
+        <article class="sound-card panel">
+          <div class="panel-heading">
+            <div>
+              <h2 id="voice-panel-title">本人声纹巡查</h2>
+            </div>
+            <span id="voice-state" class="chip">未开启</span>
+          </div>
+          <div class="meter-wrap">
+            <div class="meter-labels"><span>环境底噪</span><span>本人声音</span></div>
+            <div class="meter" role="meter" aria-label="麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <div id="volume-bar" class="volume-bar"></div>
+              <i id="volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="调整检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键调整检测门槛"></i>
+            </div>
+          </div>
+          <p id="voice-status" class="status-copy">未在检测声音</p>
+          <div class="settings">
+            <label class="recite-only">
+              未出声提醒 <output id="silence-limit-value">20 秒</output>
+              <input id="silence-limit-input" type="range" min="20" max="60" step="5" value="20" />
+            </label>
+            <label class="study-only" hidden>
+              持续出声提醒 <output id="study-voice-limit-value">8 秒</output>
+              <input id="study-voice-limit-input" type="range" min="3" max="15" step="1" value="8" />
+            </label>
+            <label>
+              <span id="voice-threshold-label">抗噪幅度</span> <output id="voice-threshold-value">底噪 + 8 dB</output>
+              <input id="voice-threshold-input" type="range" min="4" max="18" step="1" value="8" />
+            </label>
+            <div class="preflight-test-row">
+              <button id="preflight-test-button" class="button secondary" type="button">测试当前设置</button>
+              <p id="preflight-test-status" role="status" aria-live="polite">只检测，不计时、不提醒。</p>
+            </div>
+            <div class="speaker-profile-row recite-only">
+              <span id="speaker-profile-state" class="chip">正在加载声纹模型…</span>
+              <div class="speaker-profile-actions">
+                <button id="speaker-enroll-button" class="button secondary" disabled>录入本人声音</button>
+                <button id="speaker-delete-button" class="button secondary" hidden>删除声纹</button>
+              </div>
+            </div>
+            <button id="recalibrate-button" class="button secondary" disabled>重新校准环境底噪</button>
+          </div>
+        </article>
+      </section>
+
+      <section class="media-panel panel">
+        <div class="panel-heading">
+          <div>
+            <h2>督学动画库</h2>
+          </div>
+          <span id="media-count" class="chip">正在核对资源…</span>
+        </div>
+        <div class="media-controls">
+          <label for="clip-select">选择动画与对应源库音效</label>
+          <select id="clip-select" disabled></select>
+          <button id="preview-clip-button" class="button secondary" disabled>在当前场景预览</button>
+        </div>
+      </section>
+
+      <section class="log-panel panel" aria-live="polite">
+        <div class="panel-heading">
+          <div>
+            <h2>督学记录</h2>
+          </div>
+          <span id="alert-count" class="chip">0 次提醒</span>
+        </div>
+        <ol id="event-log" class="event-log">
+          <li class="empty-log">暂无记录</li>
+        </ol>
+      </section>
+    </main>
+
+    <script src="./media-player.js"></script>
+    <script src="./scene-rules.js"></script>
+    <script src="./adaptive-vad.js"></script>
+    <script src="./speaker-audio.js"></script>
+    <script src="./study-policy.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>

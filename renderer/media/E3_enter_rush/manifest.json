@@ -1,0 +1,69 @@
+{
+  "id": "E3_enter_rush",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 4.533333,
+  "frameCount": 109,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 4
+    }
+  ],
+  "posterPath": "/assets/poster/E3_enter_rush.jpg",
+  "sha256": "45e0b6b6d748cf41f18035546319eb56d5cad3e52434db9e68398d957a132c6a",
+  "audio": {
+    "path": "/media/E3_enter_rush/817c47033637d689/audio/E3_enter_rush.rwa?a=82aa4e47072c4ff8",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "2ad092b0ba2bf4ea4fc2d1e421c9aaa51e1e6233c2c16f4b261b356566c555cd",
+    "hash": "82aa4e47072c4ff8",
+    "sha256": "0de8443e21b5544469531df070752d721ba8b7e473f97779168c500c4858b66e"
+  }
+}

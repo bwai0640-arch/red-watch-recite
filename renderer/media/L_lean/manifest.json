@@ -1,0 +1,99 @@
+{
+  "id": "L_lean",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 8.066016,
+  "frameCount": 194,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_009.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_010.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_011.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_012.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 14
+    }
+  ],
+  "posterPath": "/assets/poster/L_lean.jpg",
+  "sha256": "ed1c7fbb8d728a7b5f0797e7a3e0fcc3d1b9fcaf5ac9eb72864415fc130663eb",
+  "audio": {
+    "path": "/media/L_lean/4bad7cac4ab91748/audio/L_lean.rwa?a=6a39850f1d3b892f",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "3c090025d4efbc7e01ad67499d4baa2a23dd9c14e5a8bdce9b155fadc6d0c857",
+    "hash": "6a39850f1d3b892f",
+    "sha256": "1243fdf121e1d72e5495ea58d78490b62492368492b451d48af9939ff779d611"
+  }
+}

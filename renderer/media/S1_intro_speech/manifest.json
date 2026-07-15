@@ -1,0 +1,99 @@
+{
+  "id": "S1_intro_speech",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 8.041667,
+  "frameCount": 193,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_009.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_010.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_011.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_012.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 13
+    }
+  ],
+  "posterPath": "/assets/poster/S1_intro_speech.jpg",
+  "sha256": "8dc0a0afe07b2535afc924bfce938de000e0a8462337e0a8ee0d2f0f324824c0",
+  "audio": {
+    "path": "/media/S1_intro_speech/637ea7e94a46f158/audio/S1_intro_speech.rwa?a=cb96b57d360a4e19",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "2f96211448ba71ae42a6edc1e50cdac65dcfb5c0bed87728a1bae67332fa5521",
+    "hash": "cb96b57d360a4e19",
+    "sha256": "11b59ad34b81902280fbe7a90729af10fa9e66186fec0e2c3e54f02873328a0a"
+  }
+}

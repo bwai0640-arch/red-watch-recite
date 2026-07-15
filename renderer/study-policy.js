@@ -1,0 +1,307 @@
+(function exposeStudyPolicy(root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  else root.StudyPolicy = api;
+}(typeof globalThis === 'object' ? globalThis : this, () => {
+  'use strict';
+
+  const SECOND_MS = 1_000;
+  const MINUTE_MS = 60 * SECOND_MS;
+
+  const MODE_RULES = Object.freeze({
+    recite: Object.freeze({
+      violationKind: 'silence',
+      violationSeconds: Object.freeze({ minimum: 20, maximum: 60, default: 20 }),
+      breakEveryMinutes: 20,
+      breakVoucherMinutes: 2,
+      praiseEveryMinutes: 45,
+    }),
+    study: Object.freeze({
+      violationKind: 'suspected-speech',
+      violationSeconds: Object.freeze({ minimum: 3, maximum: 15, default: 8 }),
+      breakEveryMinutes: 45,
+      breakVoucherMinutes: 2,
+      praiseEveryMinutes: 60,
+    }),
+  });
+
+  const QUIET_SENSITIVITY_DB = Object.freeze({ minimum: 6, maximum: 16, default: 10 });
+  const DEFAULT_FRAME_MS = 100;
+  const DEFAULT_REARM_QUIET_SECONDS = 1;
+
+  function clamp(value, minimum, maximum) {
+    return Math.min(maximum, Math.max(minimum, value));
+  }
+
+  function nonNegativeFinite(value, fallback = 0) {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, number) : fallback;
+  }
+
+  function nonNegativeInteger(value, fallback = 0) {
+    return Math.floor(nonNegativeFinite(value, fallback));
+  }
+
+  function getModeRules(mode) {
+    const rules = MODE_RULES[mode];
+    if (!rules) throw new RangeError(`Unknown study mode: ${mode}`);
+    return rules;
+  }
+
+  function normalizeViolationSeconds(mode, value) {
+    const rules = getModeRules(mode).violationSeconds;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return rules.default;
+    return clamp(Math.round(number), rules.minimum, rules.maximum);
+  }
+
+  function normalizeQuietSensitivityDb(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number)) return QUIET_SENSITIVITY_DB.default;
+    return clamp(number, QUIET_SENSITIVITY_DB.minimum, QUIET_SENSITIVITY_DB.maximum);
+  }
+
+  class EffectiveStudyClock {
+    constructor(options = {}) {
+      this.now = typeof options.now === 'function' ? options.now : Date.now;
+      this.accumulatedMs = nonNegativeFinite(options.elapsedMs);
+      this.running = false;
+      this.resumedAt = null;
+      if (options.running) this.resume(options.at);
+    }
+
+    timestamp(value) {
+      const candidate = value === undefined ? Number(this.now()) : Number(value);
+      if (!Number.isFinite(candidate)) throw new TypeError('Clock timestamp must be finite.');
+      return candidate;
+    }
+
+    resume(at) {
+      if (this.running) return this.elapsedMs(at);
+      this.running = true;
+      this.resumedAt = this.timestamp(at);
+      return this.accumulatedMs;
+    }
+
+    pause(at) {
+      if (!this.running) return this.accumulatedMs;
+      const timestamp = this.timestamp(at);
+      this.accumulatedMs += Math.max(0, timestamp - this.resumedAt);
+      this.running = false;
+      this.resumedAt = null;
+      return this.accumulatedMs;
+    }
+
+    elapsedMs(at) {
+      if (!this.running) return this.accumulatedMs;
+      const timestamp = this.timestamp(at);
+      return this.accumulatedMs + Math.max(0, timestamp - this.resumedAt);
+    }
+
+    snapshot(at) {
+      return Object.freeze({
+        elapsedMs: this.elapsedMs(at),
+        running: this.running,
+      });
+    }
+  }
+
+  class MilestoneLedger {
+    constructor(mode, state = {}) {
+      this.mode = mode;
+      this.rules = getModeRules(mode);
+      if (state.mode !== undefined && state.mode !== mode) {
+        throw new RangeError('Milestone state belongs to another study mode.');
+      }
+      this.settledBreakMilestones = nonNegativeInteger(state.settledBreakMilestones);
+      this.settledPraiseMilestones = nonNegativeInteger(state.settledPraiseMilestones);
+      this.availableBreakVouchers = nonNegativeInteger(state.availableBreakVouchers);
+    }
+
+    settle(effectiveElapsedMs) {
+      const elapsedMs = nonNegativeFinite(effectiveElapsedMs);
+      const breakEveryMs = this.rules.breakEveryMinutes * MINUTE_MS;
+      const praiseEveryMs = this.rules.praiseEveryMinutes * MINUTE_MS;
+      const dueBreakMilestones = Math.floor(elapsedMs / breakEveryMs);
+      const duePraiseMilestones = Math.floor(elapsedMs / praiseEveryMs);
+      const events = [];
+
+      for (let index = this.settledBreakMilestones + 1; index <= dueBreakMilestones; index += 1) {
+        events.push({
+          type: 'break-voucher-earned',
+          mode: this.mode,
+          milestoneIndex: index,
+          atEffectiveMs: index * breakEveryMs,
+          voucherDurationMs: this.rules.breakVoucherMinutes * MINUTE_MS,
+        });
+        this.availableBreakVouchers += 1;
+      }
+      this.settledBreakMilestones = Math.max(this.settledBreakMilestones, dueBreakMilestones);
+
+      for (let index = this.settledPraiseMilestones + 1; index <= duePraiseMilestones; index += 1) {
+        events.push({
+          type: 'praise-earned',
+          mode: this.mode,
+          milestoneIndex: index,
+          atEffectiveMs: index * praiseEveryMs,
+        });
+      }
+      this.settledPraiseMilestones = Math.max(this.settledPraiseMilestones, duePraiseMilestones);
+
+      events.sort((left, right) => (
+        left.atEffectiveMs - right.atEffectiveMs
+        || left.type.localeCompare(right.type)
+      ));
+      return events;
+    }
+
+    consumeBreakVoucher() {
+      if (this.availableBreakVouchers < 1) {
+        return Object.freeze({ consumed: false, durationMs: 0, remainingVouchers: 0 });
+      }
+      this.availableBreakVouchers -= 1;
+      return Object.freeze({
+        consumed: true,
+        durationMs: this.rules.breakVoucherMinutes * MINUTE_MS,
+        remainingVouchers: this.availableBreakVouchers,
+      });
+    }
+
+    availableBreakMs() {
+      return this.availableBreakVouchers * this.rules.breakVoucherMinutes * MINUTE_MS;
+    }
+
+    snapshot() {
+      return Object.freeze({
+        mode: this.mode,
+        settledBreakMilestones: this.settledBreakMilestones,
+        settledPraiseMilestones: this.settledPraiseMilestones,
+        availableBreakVouchers: this.availableBreakVouchers,
+      });
+    }
+  }
+
+  class QuietModeDetector {
+    constructor(options = {}) {
+      this.violationSeconds = normalizeViolationSeconds('study', options.violationSeconds);
+      this.sensitivityDb = normalizeQuietSensitivityDb(options.sensitivityDb);
+      this.rearmQuietMs = Math.max(
+        SECOND_MS,
+        nonNegativeFinite(options.rearmQuietSeconds, DEFAULT_REARM_QUIET_SECONDS) * SECOND_MS,
+      );
+      this.defaultFrameMs = Math.max(1, nonNegativeFinite(options.frameMs, DEFAULT_FRAME_MS));
+      this.reset();
+    }
+
+    reset() {
+      this.armed = true;
+      this.suspectedSpeechMs = 0;
+      this.quietMs = 0;
+    }
+
+    setViolationSeconds(value) {
+      this.violationSeconds = normalizeViolationSeconds('study', value);
+      this.suspectedSpeechMs = Math.min(this.suspectedSpeechMs, this.violationThresholdMs());
+      return this.violationSeconds;
+    }
+
+    setSensitivityDb(value) {
+      this.sensitivityDb = normalizeQuietSensitivityDb(value);
+      return this.sensitivityDb;
+    }
+
+    violationThresholdMs() {
+      return this.violationSeconds * SECOND_MS;
+    }
+
+    rawSpeechEvidence(feature = {}) {
+      if (typeof feature.speechEvidence === 'boolean') return feature.speechEvidence;
+      if (typeof feature.suspectedSpeech === 'boolean') return feature.suspectedSpeech;
+
+      const levelDb = Number(feature.levelDb ?? feature.db);
+      const noiseFloorDb = Number(feature.noiseFloorDb);
+      const levelDeltaDb = Number.isFinite(Number(feature.levelDeltaDb))
+        ? Number(feature.levelDeltaDb)
+        : levelDb - noiseFloorDb;
+      const voiceRatio = Number(feature.voiceRatio);
+      const flux = Number(feature.flux);
+      const amplitudeChangeDb = Number(feature.amplitudeChangeDb);
+      const hasMovement = (Number.isFinite(flux) && flux >= 0.035)
+        || (Number.isFinite(amplitudeChangeDb) && amplitudeChangeDb >= 1.6);
+
+      return feature.steadyNoise !== true
+        && Number.isFinite(levelDeltaDb)
+        && levelDeltaDb >= this.sensitivityDb
+        && Number.isFinite(voiceRatio)
+        && voiceRatio >= 0.42
+        && hasMovement;
+    }
+
+    process(feature = {}, frameMs = this.defaultFrameMs) {
+      const durationMs = Math.max(0, nonNegativeFinite(frameMs, this.defaultFrameMs));
+      const evidence = this.rawSpeechEvidence(feature);
+      let violated = false;
+      let rearmed = false;
+
+      if (!this.armed) {
+        this.suspectedSpeechMs = 0;
+        if (evidence) {
+          this.quietMs = 0;
+        } else {
+          this.quietMs += durationMs;
+          if (this.quietMs >= this.rearmQuietMs) {
+            this.armed = true;
+            this.quietMs = 0;
+            rearmed = true;
+          }
+        }
+      } else if (evidence) {
+        this.quietMs = 0;
+        this.suspectedSpeechMs += durationMs;
+        if (this.suspectedSpeechMs >= this.violationThresholdMs()) {
+          violated = true;
+          this.armed = false;
+          this.suspectedSpeechMs = 0;
+          this.quietMs = 0;
+        }
+      } else {
+        // Quiet-study violations require continuous raw evidence. A VAD hangover,
+        // an isolated key press, or any quiet gap breaks the candidate interval.
+        this.suspectedSpeechMs = 0;
+      }
+
+      return Object.freeze({
+        evidence,
+        violated,
+        rearmed,
+        armed: this.armed,
+        suspectedSpeechMs: this.suspectedSpeechMs,
+        quietMs: this.quietMs,
+        violationThresholdMs: this.violationThresholdMs(),
+        rearmQuietMs: this.rearmQuietMs,
+      });
+    }
+
+    snapshot() {
+      return Object.freeze({
+        armed: this.armed,
+        suspectedSpeechMs: this.suspectedSpeechMs,
+        quietMs: this.quietMs,
+        violationSeconds: this.violationSeconds,
+        sensitivityDb: this.sensitivityDb,
+        rearmQuietMs: this.rearmQuietMs,
+      });
+    }
+  }
+
+  return Object.freeze({
+    MODE_RULES,
+    QUIET_SENSITIVITY_DB,
+    EffectiveStudyClock,
+    MilestoneLedger,
+    QuietModeDetector,
+    getModeRules,
+    normalizeViolationSeconds,
+    normalizeQuietSensitivityDb,
+  });
+}));

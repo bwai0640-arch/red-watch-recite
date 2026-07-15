@@ -1,0 +1,75 @@
+{
+  "id": "R_pass_react_salute",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 5.041667,
+  "frameCount": 121,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 1
+    }
+  ],
+  "posterPath": "/assets/poster/R_pass_react_salute.jpg",
+  "sha256": "43e3dc92059ad58244122596aa9298c101e33f5d0f52830a153f021305a27c46",
+  "audio": {
+    "path": "/media/R_pass_react_salute/777309ede331b631/audio/R_pass_react_salute.rwa?a=3171862e825c5e26",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "766c8bf597a1f28f454228eb2d0b285a1461a8e457a6c6675fe7696e69caa8e4",
+    "hash": "3171862e825c5e26",
+    "sha256": "a4242d401fb00c38c89a0bfedfbbbfb1474d418abd00cccf077e76043fab7920"
+  }
+}

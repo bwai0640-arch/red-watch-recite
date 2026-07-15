@@ -1,0 +1,75 @@
+{
+  "id": "R_note_logbook",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 5.041667,
+  "frameCount": 121,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 1
+    }
+  ],
+  "posterPath": "/assets/poster/R_note_logbook.jpg",
+  "sha256": "cab0dade89c6aed6ee6a3771c28fe95a989c5d6a847087b55a1c078ce66f237d",
+  "audio": {
+    "path": "/media/R_note_logbook/b45581b01b89ad84/audio/R_note_logbook.rwa?a=1e1ca9b422c6186d",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "33454d6d91607811c74cb33c3873e6f8d3fe33789ff819547010f2a780442269",
+    "hash": "1e1ca9b422c6186d",
+    "sha256": "eab8aefdc95c9e5e0c10bcabd54183d76f7e61575477f5a2a33fb9dbc2986b20"
+  }
+}

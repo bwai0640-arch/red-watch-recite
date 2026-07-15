@@ -1,0 +1,75 @@
+{
+  "id": "R_fatigue_warning",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 5.041667,
+  "frameCount": 121,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 1
+    }
+  ],
+  "posterPath": "/assets/poster/R_fatigue_warning.jpg",
+  "sha256": "70f660a28a12c024520bf0a2e646c82c1f10e8ac88c3065bcfc9ae21b91a49d2",
+  "audio": {
+    "path": "/media/R_fatigue_warning/cedfb7ac9bfd7fa3/audio/R_fatigue_warning.rwa?a=34c6fa6144a74bb1",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "2bba7d43161f54ed48ac84390a6691220d68a1c832935c12716ead8899ffd15d",
+    "hash": "34c6fa6144a74bb1",
+    "sha256": "ec30befb8fcd2a988843d55185c673ddf45b699218b7e2be61fe9909eb476f26"
+  }
+}

@@ -1,0 +1,99 @@
+{
+  "id": "R_aim_shoot",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 8.041667,
+  "frameCount": 193,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_004.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_005.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_006.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_007.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_008.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_009.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_010.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_011.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_012.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 13
+    }
+  ],
+  "posterPath": "/assets/poster/R_aim_shoot.jpg",
+  "sha256": "2d2f9a3570c8823a3c05b8d25d2c78f801cb73fd4d3d7ad79f9d2186ea263483",
+  "audio": {
+    "path": "/media/R_aim_shoot/79bb9af22defd92a/audio/R_aim_shoot.rwa?a=2d1d6a5a85fc7ab5",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "60e9ab9ca8b4653e2983d1de1e0b8970d676d1e514d6275efce31f5da7cace0a",
+    "hash": "2d1d6a5a85fc7ab5",
+    "sha256": "7b9a1feb365a571b7ab05400bac6b5fc04ec9ba2d46f3685eec82e5460a80d80"
+  }
+}

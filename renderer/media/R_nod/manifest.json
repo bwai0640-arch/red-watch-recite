@@ -1,0 +1,45 @@
+{
+  "id": "R_nod",
+  "type": "sprite-sheet",
+  "frameRate": 24,
+  "width": 1280,
+  "height": 720,
+  "duration": 1.9,
+  "frameCount": 46,
+  "sheets": [
+    {
+      "file": "sheet_000.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_001.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_002.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 15
+    },
+    {
+      "file": "sheet_003.webp",
+      "cols": 3,
+      "rows": 5,
+      "count": 1
+    }
+  ],
+  "posterPath": "/assets/poster/R_nod.jpg",
+  "sha256": "50f20287ad42c2159b1f839f9652920f8222754de11cc9b620aba0b04a0c4817",
+  "audio": {
+    "path": "/media/R_nod/033cd10e4d83e893/audio/R_nod.rwa?a=0c62c6c3e5eb5c98",
+    "codec": "mp3",
+    "obfuscation": "xor-v1",
+    "keyHex": "e09bf997a876ef3678e7b2a620ebd83a6c485ff236447e0ffd295e34f0a43524",
+    "hash": "0c62c6c3e5eb5c98",
+    "sha256": "e35944f4fc4752a92c7b28b6ac7a07b89378b158c5b54d5f2a51164e0142fa28"
+  }
+}

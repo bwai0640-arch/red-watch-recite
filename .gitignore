@@ -1,0 +1,38 @@
+# Installed dependencies and package-manager caches
+/node_modules/
+/.pnpm-store/
+/.electron-cache/
+/.cache/
+
+# Local build and release outputs
+/dist/
+/release-staging/
+
+# Runtime data and local speaker profiles (match every nested copy)
+/RedWatchReciteData/
+**/RedWatchReciteData/
+**/speaker-profile.dat*
+
+# Local audit artifacts and real-person test recordings
+/work/
+
+# Local environment files; sanitized examples remain eligible for tracking
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Logs, temporary files and common OS/editor caches
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+/logs/
+/tmp/
+/temp/
+.DS_Store
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,19 @@
+* text=auto
+
+*.js text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.css text eol=lf
+*.html text eol=lf
+*.txt text eol=lf
+
+*.onnx binary
+*.png binary
+*.ico binary
+*.wav binary
+*.webp binary
+*.rwa binary

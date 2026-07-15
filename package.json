@@ -1,0 +1,60 @@
+{
+  "name": "red-watch-recite",
+  "version": "1.8.0",
+  "description": "凛冬督学局：本地背书与安静自习监督桌面应用",
+  "main": "main.js",
+  "author": "原作：叛逆蓝牙 · 二创：眼泪斷了线",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "1.13.4"
+  },
+  "devDependencies": {
+    "electron": "43.1.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "top.redwatch.recite",
+    "productName": "凛冬督学局",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "break-prompt-preload.js",
+      "speaker-service.js",
+      "speaker-worker.js",
+      "renderer/**/*",
+      "models/**/*",
+      "assets/**/*",
+      "LICENSES/**/*",
+      "THIRD_PARTY_NOTICES.md",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "speaker-worker.js",
+      "models/**/*",
+      "node_modules/sherpa-onnx-node/**/*",
+      "node_modules/sherpa-onnx-win-x64/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "凛冬督学局.exe"
+    }
+  }
+}
