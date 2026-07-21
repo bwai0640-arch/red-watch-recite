@@ -182,11 +182,17 @@ h2 { margin-bottom: 0; font-size: 1.25rem; }
 .settings label { display: grid; grid-template-columns: 1fr auto; gap: 7px 10px; color: var(--muted); font-size: .85rem; }
 .settings output { color: var(--ink); font-family: ui-monospace, Consolas, monospace; }
 .settings input { grid-column: 1 / -1; width: 100%; accent-color: var(--red); }
+.microphone-row { display: grid; grid-template-columns: minmax(92px, auto) minmax(0, 1fr); gap: 8px 12px; align-items: center; }
+.microphone-row > label { display: block; color: var(--muted); font-size: .85rem; }
+.microphone-row > div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.microphone-row select, .speaker-profile-actions select { min-width: 0; height: 40px; padding: 0 10px; border: 1px solid var(--line); color: var(--ink); background: #160e0c; }
+.microphone-row .button { min-height: 40px; padding: 0 13px; }
+#microphone-status { grid-column: 2; min-width: 0; margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .preflight-test-row { display: grid; grid-template-columns: minmax(170px, auto) minmax(0, 1fr); align-items: center; gap: 12px; }
 .preflight-test-row .button { min-width: 0; }
 #preflight-test-status { min-width: 0; margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.45; }
 .speaker-profile-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.speaker-profile-actions { display: grid; grid-template-columns: repeat(2, minmax(0, auto)); gap: 8px; }
+.speaker-profile-actions { display: grid; grid-template-columns: minmax(0, 190px) repeat(2, minmax(0, auto)); gap: 8px; }
 .speaker-profile-actions .button { min-width: 0; min-height: 40px; padding: 0 13px; }
 
 .media-panel { margin-top: 18px; padding: 20px; }
@@ -302,6 +308,8 @@ body.enrollment-mode .scene-shade { background: linear-gradient(180deg, rgba(10,
   body.scene-mode:not(.controls-open) .actions { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .live-voice-strip { grid-template-columns: 1fr; gap: 10px; }
   .speaker-profile-row { align-items: stretch; flex-direction: column; }
+  .microphone-row { grid-template-columns: 1fr; }
+  #microphone-status { grid-column: 1; }
   .enrollment-actions { grid-template-columns: 1fr 1fr; }
 }
 

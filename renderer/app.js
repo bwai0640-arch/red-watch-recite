@@ -21,6 +21,9 @@ const UI = {
   voiceThreshold: document.querySelector('#voice-threshold-input'),
   voiceThresholdValue: document.querySelector('#voice-threshold-value'),
   voiceThresholdLabel: document.querySelector('#voice-threshold-label'),
+  microphoneSelect: document.querySelector('#microphone-select'),
+  refreshMicrophonesButton: document.querySelector('#refresh-microphones-button'),
+  microphoneStatus: document.querySelector('#microphone-status'),
   preflightTestButton: document.querySelector('#preflight-test-button'),
   preflightTestStatus: document.querySelector('#preflight-test-status'),
   silenceLimit: document.querySelector('#silence-limit-input'),
@@ -45,6 +48,7 @@ const UI = {
   previewClipButton: document.querySelector('#preview-clip-button'),
   recalibrateButton: document.querySelector('#recalibrate-button'),
   speakerProfileState: document.querySelector('#speaker-profile-state'),
+  speakerProfileSelect: document.querySelector('#speaker-profile-select'),
   speakerEnrollButton: document.querySelector('#speaker-enroll-button'),
   speakerDeleteButton: document.querySelector('#speaker-delete-button'),
   speakerEnrollment: document.querySelector('#speaker-enrollment'),
@@ -129,7 +133,9 @@ const state = {
   speakerReady: false,
   speakerProfileExists: false,
   speakerProfileCreatedAt: '',
+  speakerProfiles: [],
   speakerModelError: '',
+  speakerProfileError: '',
   speakerChunks: [],
   speakerSampleCount: 0,
   speakerVerificationPending: false,
@@ -160,7 +166,10 @@ const state = {
     studyVoiceSeconds: POLICY.MODE_RULES.study.violationSeconds.default,
     reciteSensitivityDb: 8,
     studySensitivityDb: POLICY.QUIET_SENSITIVITY_DB.default,
+    microphoneDeviceId: '',
   },
+  microphoneDevices: [],
+  microphoneRefreshPending: false,
   mediaCatalog: [],
   scenePlayer: null,
   sceneToken: 0,
@@ -205,6 +214,9 @@ function loadSettings() {
     state.settings.studySensitivityDb = POLICY.normalizeQuietSensitivityDb(
       stored.studySensitivityDb,
     );
+    state.settings.microphoneDeviceId = typeof stored.microphoneDeviceId === 'string'
+      ? stored.microphoneDeviceId.slice(0, 512)
+      : '';
   } catch {
     // Invalid local preferences fall back to the safe defaults above.
   }
@@ -215,6 +227,89 @@ function saveSettings() {
     mode: state.mode,
     ...state.settings,
   }));
+}
+
+function microphoneSelectionLocked() {
+  return state.active
+    || state.startPending
+    || state.preflightTesting
+    || state.preflightStarting
+    || state.preflightStopping
+    || state.enrollmentOpen
+    || state.enrollmentPending
+    || state.enrollmentBusy;
+}
+
+function selectedMicrophone() {
+  return state.microphoneDevices.find((device) => device.deviceId === state.settings.microphoneDeviceId) || null;
+}
+
+function selectedMicrophoneProfileLabel() {
+  const selected = selectedMicrophone();
+  const current = selected?.label || (state.settings.microphoneDeviceId ? '已选麦克风' : '系统默认麦克风');
+  return current.slice(0, 80);
+}
+
+function microphoneConstraints() {
+  const audio = {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true,
+  };
+  if (state.settings.microphoneDeviceId) {
+    audio.deviceId = { exact: state.settings.microphoneDeviceId };
+  }
+  return { audio, video: false };
+}
+
+function renderMicrophoneUi() {
+  const selectedId = state.settings.microphoneDeviceId;
+  const selectedPresent = !selectedId || state.microphoneDevices.some((device) => device.deviceId === selectedId);
+  UI.microphoneSelect.replaceChildren();
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = '系统默认麦克风';
+  UI.microphoneSelect.append(defaultOption);
+  for (const [index, device] of state.microphoneDevices.entries()) {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || `麦克风 ${index + 1}`;
+    UI.microphoneSelect.append(option);
+  }
+  if (!selectedPresent) {
+    const missing = document.createElement('option');
+    missing.value = selectedId;
+    missing.textContent = '已选麦克风不可用，请重新选择';
+    UI.microphoneSelect.append(missing);
+  }
+  UI.microphoneSelect.value = selectedId;
+  UI.microphoneSelect.disabled = microphoneSelectionLocked() || state.microphoneRefreshPending;
+  UI.refreshMicrophonesButton.disabled = microphoneSelectionLocked() || state.microphoneRefreshPending;
+  const selected = selectedMicrophone();
+  if (selectedId && !selectedPresent) {
+    UI.microphoneStatus.textContent = '已选麦克风不可用，请刷新后重新选择。';
+  } else if (selected) {
+    UI.microphoneStatus.textContent = `当前：${selected.label || '已选麦克风'}。用于测试、学习和声纹录入。`;
+  } else {
+    UI.microphoneStatus.textContent = '当前：系统默认麦克风。用于测试、学习和声纹录入。';
+  }
+}
+
+async function refreshMicrophones({ requestPermission = false } = {}) {
+  if (!navigator.mediaDevices?.enumerateDevices) throw new Error('当前环境无法枚举麦克风。');
+  if (state.microphoneRefreshPending) return;
+  state.microphoneRefreshPending = true;
+  renderMicrophoneUi();
+  let permissionStream = null;
+  try {
+    if (requestPermission) permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    state.microphoneDevices = devices.filter((device) => device.kind === 'audioinput');
+  } finally {
+    permissionStream?.getTracks().forEach((track) => track.stop());
+    state.microphoneRefreshPending = false;
+    renderMicrophoneUi();
+  }
 }
 
 function violationLimitSeconds() {
@@ -473,7 +568,9 @@ function updatePreflightUi(status) {
   UI.preflightTestButton.textContent = '测试当前设置';
   UI.preflightTestButton.disabled = !preflightCanStart();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
-    UI.preflightTestStatus.textContent = '请先录入本人声音，再测试背书检测。';
+    UI.preflightTestStatus.textContent = state.speakerProfileError
+      ? `${state.speakerProfileError} 请重新录入一次。`
+      : '请先录入本人声音，再测试背书检测。';
   } else if (state.mode === 'recite' && !state.speakerReady) {
     UI.preflightTestStatus.textContent = state.speakerModelError || '正在准备声纹模型…';
   }
@@ -532,6 +629,7 @@ function updateModeUi() {
     || state.sceneRunning
     || Boolean(state.presentation)
     || state.enrollmentOpen;
+  renderMicrophoneUi();
   updateBreakButton();
   updatePreflightUi();
 }
@@ -557,7 +655,9 @@ function setMode(mode) {
   updateModeUi();
   if (mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
     setChip(UI.voiceState, '需要录入本人声纹');
-    UI.voiceStatus.textContent = '开始学习前先录入本人声音';
+    UI.voiceStatus.textContent = state.speakerProfileError
+      ? `${state.speakerProfileError} 请重新录入一次。`
+      : '开始学习前先录入本人声音';
   } else if (!state.active) {
     setChip(UI.voiceState, mode === 'study' ? '等待安静自习' : '未开启');
     UI.voiceStatus.textContent = '未在检测声音';
@@ -574,22 +674,34 @@ function updateSpeakerProfileUi() {
     setChip(UI.speakerProfileState, '声纹模型不可用', 'alert');
     UI.speakerEnrollButton.disabled = true;
     UI.speakerDeleteButton.hidden = true;
+    UI.speakerProfileSelect.hidden = true;
     return;
   }
   if (!state.speakerReady) {
     setChip(UI.speakerProfileState, '正在加载声纹模型…');
     UI.speakerEnrollButton.disabled = true;
     UI.speakerDeleteButton.hidden = true;
+    UI.speakerProfileSelect.hidden = true;
     return;
   }
   if (state.speakerProfileExists) {
-    setChip(UI.speakerProfileState, '已录入本人声纹', 'good');
-    UI.speakerEnrollButton.textContent = '重新录入';
+    const count = state.speakerProfiles.length;
+    setChip(UI.speakerProfileState, `已保存 ${count} 份本人声纹`, 'good');
+    UI.speakerProfileSelect.replaceChildren();
+    for (const [index, profile] of state.speakerProfiles.entries()) {
+      const option = document.createElement('option');
+      option.value = profile.id;
+      option.textContent = profile.label || `声纹 ${index + 1}`;
+      UI.speakerProfileSelect.append(option);
+    }
+    UI.speakerProfileSelect.hidden = false;
+    UI.speakerEnrollButton.textContent = '新增当前麦克风声纹';
     UI.speakerDeleteButton.hidden = false;
   } else {
-    setChip(UI.speakerProfileState, '尚未录入本人声纹');
+    setChip(UI.speakerProfileState, state.speakerProfileError ? '旧声纹需要重新录入' : '尚未录入本人声纹', state.speakerProfileError ? 'alert' : '');
     UI.speakerEnrollButton.textContent = '录入本人声音';
     UI.speakerDeleteButton.hidden = true;
+    UI.speakerProfileSelect.hidden = true;
   }
   const speakerActionDisabled = state.active
     || state.startPending
@@ -601,6 +713,7 @@ function updateSpeakerProfileUi() {
     || state.enrollmentBusy;
   UI.speakerEnrollButton.disabled = speakerActionDisabled;
   UI.speakerDeleteButton.disabled = speakerActionDisabled;
+  UI.speakerProfileSelect.disabled = speakerActionDisabled;
   updatePreflightUi();
 }
 
@@ -610,14 +723,15 @@ async function refreshSpeakerState() {
     state.speakerReady = Boolean(profile?.ready);
     state.speakerProfileExists = Boolean(profile?.profileExists);
     state.speakerProfileCreatedAt = profile?.createdAt || '';
+    state.speakerProfiles = Array.isArray(profile?.profiles) ? profile.profiles : [];
     state.speakerModelError = state.speakerReady ? '' : (profile?.error || '声纹服务启动失败');
-    if (state.speakerReady && profile?.error && !state.speakerProfileExists) {
-      UI.voiceStatus.textContent = profile.error;
-    }
+    state.speakerProfileError = state.speakerReady && !state.speakerProfileExists ? (profile?.error || '') : '';
   } catch (error) {
     state.speakerReady = false;
     state.speakerProfileExists = false;
+    state.speakerProfiles = [];
     state.speakerModelError = error.message || '声纹服务启动失败';
+    state.speakerProfileError = '';
   }
   updateSpeakerProfileUi();
   updatePreflightUi(
@@ -667,7 +781,7 @@ async function openSpeakerEnrollment() {
         return false;
       }
     }
-    await window.desktopAPI.beginSpeakerEnrollment();
+    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() });
     state.enrollmentOpen = true;
     state.enrollmentBusy = false;
     UI.enrollmentMicState.textContent = '麦克风：准备就绪';
@@ -696,10 +810,7 @@ async function closeSpeakerEnrollment({ cancel = false } = {}) {
 }
 
 async function captureEnrollmentMicrophone(durationSeconds) {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: false,
-  });
+  const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints());
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   let context;
   try {
@@ -775,7 +886,7 @@ async function runEnrollmentMicrophone() {
     await refreshSpeakerState();
   } catch (error) {
     await window.desktopAPI.cancelSpeakerEnrollment().catch(() => {});
-    await window.desktopAPI.beginSpeakerEnrollment().catch(() => {});
+    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() }).catch(() => {});
     UI.enrollmentMicState.textContent = '麦克风：录入失败';
     UI.enrollmentStatus.textContent = error.message;
     UI.enrollmentMicButton.textContent = `重新录入 ${ENROLLMENT_DURATION_SECONDS} 秒`;
@@ -804,7 +915,9 @@ async function deleteSpeakerProfile() {
   try {
     await stopPreflightTest({ status: '本人声纹已删除，请重新录入后再测试。' });
     if (state.active || state.startPending || state.previewPending || state.presentation || state.enrollmentOpen) return;
-    await window.desktopAPI.deleteSpeakerProfile();
+    const profileId = UI.speakerProfileSelect.value;
+    if (!profileId) throw new Error('请先选择要删除的声纹。');
+    await window.desktopAPI.deleteSpeakerProfile(profileId);
     await refreshSpeakerState();
     UI.voiceStatus.textContent = '本人声纹已删除';
   } finally {
@@ -1206,10 +1319,7 @@ async function openMicrophone() {
   let audioContext = null;
   let pcmCapture = null;
   try {
-    audioStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    });
+    audioStream = await navigator.mediaDevices.getUserMedia(microphoneConstraints());
     if (audioStream.getVideoTracks().length !== 0) {
       throw new Error('检测到非预期的视频轨道，已拒绝启动。');
     }
@@ -1270,6 +1380,7 @@ async function openMicrophone() {
     state.pcmCapture = pcmCapture;
     window.clearInterval(state.audioTimer);
     state.audioTimer = window.setInterval(pollMicrophone, MICROPHONE_POLL_MS);
+    refreshMicrophones().catch(() => {});
     return true;
   } catch (error) {
     pcmCapture?.stop();
@@ -2459,6 +2570,18 @@ UI.preflightTestButton.addEventListener('click', () => {
 bindThresholdMarker(UI.thresholdMarker, UI.meter);
 bindThresholdMarker(UI.liveThresholdMarker, UI.liveMeter);
 UI.voiceThreshold.addEventListener('input', updateThreshold);
+UI.refreshMicrophonesButton.addEventListener('click', () => {
+  refreshMicrophones({ requestPermission: true }).catch((error) => {
+    UI.microphoneStatus.textContent = `无法刷新麦克风：${error.message}`;
+  });
+});
+UI.microphoneSelect.addEventListener('change', () => {
+  if (microphoneSelectionLocked()) return;
+  state.settings.microphoneDeviceId = UI.microphoneSelect.value;
+  saveSettings();
+  renderMicrophoneUi();
+  updatePreflightUi('麦克风已切换，可按当前设置重新测试。');
+});
 UI.silenceLimit.addEventListener('input', () => {
   const previousSeconds = state.settings.reciteSilenceSeconds;
   state.settings.reciteSilenceSeconds = POLICY.normalizeViolationSeconds('recite', UI.silenceLimit.value);
@@ -2503,6 +2626,11 @@ window.desktopAPI.onWindowModeChanged(({ mode, minimized = false }) => {
   }
 });
 window.desktopAPI.onWindowMaximizedChanged(({ maximized }) => setWindowMaximizedControl(maximized));
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener('devicechange', () => {
+    if (!microphoneSelectionLocked()) refreshMicrophones().catch(() => {});
+  });
+}
 window.desktop.onBreakPromptAction((action) => {
   if (action === 'start') {
     startBreak().then((started) => {
@@ -2619,6 +2747,7 @@ window.__beishuTest = Object.freeze({
 
 async function initialize() {
   loadSettings();
+  await refreshMicrophones().catch(() => {});
   updateModeUi();
   state.scenePlayer = new DisciplineMediaPlayer(UI.sceneCanvas, { statusElement: UI.sceneStatus });
   await loadMediaCatalog();
@@ -2629,7 +2758,9 @@ async function initialize() {
   updateModeUi();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
     setChip(UI.voiceState, '需要录入本人声纹');
-    UI.voiceStatus.textContent = '开始学习前先录入本人声音';
+    UI.voiceStatus.textContent = state.speakerProfileError
+      ? `${state.speakerProfileError} 请重新录入一次。`
+      : '开始学习前先录入本人声音';
   } else if (state.mode === 'study') {
     setChip(UI.voiceState, '等待安静自习');
     UI.voiceStatus.textContent = '未在检测声音';

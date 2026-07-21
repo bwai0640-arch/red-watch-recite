@@ -6,10 +6,11 @@ const fsp = require('node:fs/promises');
 const path = require('node:path');
 const { Worker } = require('node:worker_threads');
 
-const PROFILE_SCHEMA_VERSION = 2;
+const PROFILE_SCHEMA_VERSION = 3;
 const PROFILE_FILE = 'speaker-profile.dat';
 const MIN_ENROLLMENT_SAMPLES = 6;
 const MAX_ENROLLMENT_SAMPLES = 8;
+const MAX_SAVED_PROFILES = 5;
 const MIN_SAMPLE_RATE = 8_000;
 const MAX_SAMPLE_RATE = 96_000;
 const MIN_SAMPLE_SECONDS = 0.75;
@@ -248,7 +249,7 @@ class SpeakerService {
     this.modelPath = path.resolve(String(options.modelPath || ''));
     this.dataRoot = path.resolve(String(options.dataRoot || ''));
     this.profilePath = path.join(this.dataRoot, PROFILE_FILE);
-    this.safeStorage = options.safeStorage;
+    this.profileCrypto = options.profileCrypto;
     this.worker = null;
     this.modelHash = '';
     this.dimension = 0;
@@ -263,10 +264,13 @@ class SpeakerService {
   }
 
   getState() {
+    const profiles = this.profile?.profiles || [];
     return {
       ready: Boolean(this.modelReady && this.storageReady && this.worker && !this.worker.closed),
-      profileExists: Boolean(this.profile),
-      createdAt: this.profile?.createdAt || null,
+      profileExists: profiles.length > 0,
+      createdAt: profiles[0]?.createdAt || null,
+      profileCount: profiles.length,
+      profiles: profiles.map(({ id, label, createdAt }) => ({ id, label, createdAt })),
       error: this.fatalError || this.profileError || null,
       enrolling: Boolean(this.enrollment),
       enrollmentCount: this.enrollment?.embeddings.length || 0,
@@ -305,9 +309,9 @@ class SpeakerService {
         this.modelReady = true;
 
         this.storageReady = Boolean(
-          this.safeStorage
-          && typeof this.safeStorage.isEncryptionAvailable === 'function'
-          && this.safeStorage.isEncryptionAvailable(),
+          this.profileCrypto
+          && typeof this.profileCrypto.isAvailable === 'function'
+          && await this.profileCrypto.isAvailable(),
         );
         if (!this.storageReady) {
           throw new SpeakerServiceError('ENCRYPTION_UNAVAILABLE', '系统无法安全保存声纹，请检查 Windows 用户环境。');
@@ -330,12 +334,38 @@ class SpeakerService {
   }
 
   validateProfile(value) {
-    if (!value || typeof value !== 'object' || value.schemaVersion !== PROFILE_SCHEMA_VERSION) {
+    if (!value || typeof value !== 'object') {
+      throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案版本无效，请重新录入。');
+    }
+    if (value.schemaVersion === 2) return this.migrateLegacyProfile(value);
+    if (value.schemaVersion !== PROFILE_SCHEMA_VERSION) {
       throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案版本无效，请重新录入。');
     }
     if (value.modelHash !== this.modelHash || value.dimension !== this.dimension) {
       throw new SpeakerServiceError('PROFILE_MODEL_MISMATCH', '声纹模型已经更新，请重新录入本人声音。');
     }
+    if (!Array.isArray(value.profiles) || value.profiles.length < 1 || value.profiles.length > MAX_SAVED_PROFILES) {
+      throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案数量无效，请重新录入。');
+    }
+    const ids = new Set();
+    const profiles = value.profiles.map((item, index) => this.validateProfileItem(item, index, ids));
+    return {
+      schemaVersion: PROFILE_SCHEMA_VERSION,
+      modelHash: this.modelHash,
+      dimension: this.dimension,
+      threshold: VERIFICATION_THRESHOLD,
+      strongThreshold: STRONG_MATCH_THRESHOLD,
+      profiles,
+    };
+  }
+
+  validateProfileItem(value, index, ids) {
+    if (!value || typeof value !== 'object' || typeof value.id !== 'string' || !/^[a-f0-9-]{8,64}$/iu.test(value.id) || ids.has(value.id)) {
+      throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案标识无效，请重新录入。');
+    }
+    ids.add(value.id);
+    const label = String(value.label || '').trim().slice(0, 80);
+    if (!label) throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案名称无效，请重新录入。');
     if (!Array.isArray(value.embeddings)
       || value.embeddings.length < MIN_ENROLLMENT_SAMPLES
       || value.embeddings.length > MAX_ENROLLMENT_SAMPLES) {
@@ -356,15 +386,34 @@ class SpeakerService {
     if (!Number.isFinite(createdAt.getTime())) {
       throw new SpeakerServiceError('PROFILE_INVALID', '声纹档案日期无效，请重新录入。');
     }
+    return { id: value.id, label: label || `声纹 ${index + 1}`, createdAt: createdAt.toISOString(), embeddings };
+  }
+
+  migrateLegacyProfile(value) {
+    if (value.modelHash !== this.modelHash || value.dimension !== this.dimension) {
+      throw new SpeakerServiceError('PROFILE_MODEL_MISMATCH', '声纹模型已经更新，请重新录入本人声音。');
+    }
+    const legacy = this.validateProfileItem({
+      id: '00000000-0000-4000-8000-000000000001',
+      label: '原有声纹',
+      createdAt: value.createdAt,
+      embeddings: value.embeddings,
+    }, 0, new Set());
     return {
       schemaVersion: PROFILE_SCHEMA_VERSION,
       modelHash: this.modelHash,
       dimension: this.dimension,
-      createdAt: createdAt.toISOString(),
       threshold: VERIFICATION_THRESHOLD,
       strongThreshold: STRONG_MATCH_THRESHOLD,
-      embeddings,
+      profiles: [legacy],
     };
+  }
+
+  workerProfiles(profile) {
+    return profile.profiles.map((item) => ({
+      id: item.id,
+      embeddings: item.embeddings.map((entry) => Array.from(entry)),
+    }));
   }
 
   async loadProfile() {
@@ -378,11 +427,9 @@ class SpeakerService {
       throw new SpeakerServiceError('PROFILE_READ_FAILED', '声纹档案无法读取，请重新录入。', { cause: error });
     }
     try {
-      const plaintext = this.safeStorage.decryptString(encrypted);
+      const plaintext = await this.profileCrypto.decryptString(encrypted);
       const profile = this.validateProfile(JSON.parse(plaintext));
-      await this.worker.request('setProfile', {
-        embeddings: profile.embeddings.map((entry) => Array.from(entry)),
-      });
+      await this.worker.request('setProfiles', { profiles: this.workerProfiles(profile) });
       this.profile = profile;
     } catch (error) {
       await this.worker.request('clearProfile').catch(() => {});
@@ -390,10 +437,20 @@ class SpeakerService {
     }
   }
 
-  beginEnrollment() {
+  beginEnrollment(payload = {}) {
     return this.runExclusive(async () => {
       this.assertOperational();
-      this.enrollment = { startedAt: new Date().toISOString(), embeddings: [], sources: [] };
+      if ((this.profile?.profiles.length || 0) >= MAX_SAVED_PROFILES) {
+        throw new SpeakerServiceError('PROFILE_LIMIT_REACHED', `最多可保存 ${MAX_SAVED_PROFILES} 份声纹，请先删除不再使用的声纹。`);
+      }
+      const requestedLabel = String(payload?.label || '').trim().replace(/\s+/gu, ' ').slice(0, 80);
+      const number = (this.profile?.profiles.length || 0) + 1;
+      this.enrollment = {
+        startedAt: new Date().toISOString(),
+        label: requestedLabel || `声纹 ${number}`,
+        embeddings: [],
+        sources: [],
+      };
       return this.getState();
     });
   }
@@ -444,22 +501,25 @@ class SpeakerService {
         schemaVersion: PROFILE_SCHEMA_VERSION,
         modelHash: this.modelHash,
         dimension: this.dimension,
-        createdAt: new Date().toISOString(),
         threshold: VERIFICATION_THRESHOLD,
         strongThreshold: STRONG_MATCH_THRESHOLD,
-        embeddings: selectedEmbeddings,
+        profiles: [
+          ...(previousProfile?.profiles || []),
+          {
+            id: crypto.randomUUID(),
+            label: this.enrollment.label,
+            createdAt: new Date().toISOString(),
+            embeddings: selectedEmbeddings,
+          },
+        ],
       };
-      await this.worker.request('setProfile', {
-        embeddings: profile.embeddings.map((entry) => Array.from(entry)),
-      });
+      await this.worker.request('setProfiles', { profiles: this.workerProfiles(profile) });
 
       try {
         await this.writeProfile(profile);
       } catch (error) {
         if (previousProfile) {
-          await this.worker.request('setProfile', {
-            embeddings: previousProfile.embeddings.map((entry) => Array.from(entry)),
-          }).catch(() => {});
+          await this.worker.request('setProfiles', { profiles: this.workerProfiles(previousProfile) }).catch(() => {});
         } else {
           await this.worker.request('clearProfile').catch(() => {});
         }
@@ -478,14 +538,18 @@ class SpeakerService {
       schemaVersion: profile.schemaVersion,
       modelHash: profile.modelHash,
       dimension: profile.dimension,
-      createdAt: profile.createdAt,
       threshold: profile.threshold,
       strongThreshold: profile.strongThreshold,
-      embeddings: profile.embeddings.map((entry) => Array.from(entry)),
+      profiles: profile.profiles.map((item) => ({
+        id: item.id,
+        label: item.label,
+        createdAt: item.createdAt,
+        embeddings: item.embeddings.map((entry) => Array.from(entry)),
+      })),
     });
     let encrypted;
     try {
-      encrypted = this.safeStorage.encryptString(serialized);
+      encrypted = await this.profileCrypto.encryptString(serialized);
     } catch (error) {
       throw new SpeakerServiceError('PROFILE_ENCRYPT_FAILED', '声纹档案无法安全加密。', { cause: error });
     }
@@ -551,18 +615,29 @@ class SpeakerService {
     });
   }
 
-  deleteProfile() {
+  deleteProfile(profileId) {
     return this.runExclusive(async () => {
       this.assertOperational();
       this.enrollment = null;
+      if (!this.profile) return this.getState();
+      const removeAll = typeof profileId !== 'string' || !profileId;
+      const remaining = removeAll ? [] : this.profile.profiles.filter((item) => item.id !== profileId);
+      if (!removeAll && remaining.length === this.profile.profiles.length) {
+        throw new SpeakerServiceError('PROFILE_NOT_FOUND', '未找到要删除的声纹。');
+      }
       try {
-        await fsp.rm(this.profilePath, { force: true });
+        if (!remaining.length) {
+          await fsp.rm(this.profilePath, { force: true });
+        } else {
+          await this.writeProfile({ ...this.profile, profiles: remaining });
+        }
       } catch (error) {
         throw new SpeakerServiceError('PROFILE_DELETE_FAILED', '声纹档案无法删除。', { cause: error });
       }
-      this.profile = null;
+      this.profile = remaining.length ? { ...this.profile, profiles: remaining } : null;
       this.profileError = null;
-      await this.worker.request('clearProfile');
+      if (this.profile) await this.worker.request('setProfiles', { profiles: this.workerProfiles(this.profile) });
+      else await this.worker.request('clearProfile');
       return this.getState();
     });
   }

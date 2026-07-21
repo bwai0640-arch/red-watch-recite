@@ -16,13 +16,14 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   finishInlineAlert: (payload) => ipcRenderer.invoke('finish-inline-alert', payload),
   getAnimationCanvas: () => ipcRenderer.invoke('get-animation-canvas'),
   getRuntimeWindowState: () => ipcRenderer.invoke('get-runtime-window-state'),
+  getRuntimeCacheState: () => ipcRenderer.invoke('get-runtime-cache-state'),
   getSpeakerState: () => ipcRenderer.invoke('speaker:get-state'),
-  beginSpeakerEnrollment: () => ipcRenderer.invoke('speaker:begin-enrollment'),
+  beginSpeakerEnrollment: (payload) => ipcRenderer.invoke('speaker:begin-enrollment', payload),
   addSpeakerEnrollmentSample: (payload) => ipcRenderer.invoke('speaker:add-enrollment-sample', payload),
   finishSpeakerEnrollment: () => ipcRenderer.invoke('speaker:finish-enrollment'),
   cancelSpeakerEnrollment: () => ipcRenderer.invoke('speaker:cancel-enrollment'),
   verifySpeaker: (payload) => ipcRenderer.invoke('speaker:verify', payload),
-  deleteSpeakerProfile: () => ipcRenderer.invoke('speaker:delete-profile'),
+  deleteSpeakerProfile: (profileId) => ipcRenderer.invoke('speaker:delete-profile', { profileId }),
   quitApp: () => ipcRenderer.invoke('quit-app'),
   onWindowModeChanged: (callback) => {
     return subscribe('window-mode-changed', callback);

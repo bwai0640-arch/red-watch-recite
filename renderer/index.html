@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#160c0b" />
     <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
-    <title>凛冬督学局</title>
+    <title>背书自习监督</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body class="scene-mode" data-window-mode="scene" data-vad-state="stopped">
     <header id="window-titlebar" class="window-titlebar" aria-label="窗口标题栏">
-      <div class="window-title">凛冬督学局</div>
+      <div class="window-title">背书自习监督</div>
       <div class="window-controls" aria-label="窗口控制">
         <button id="window-minimize-button" class="window-control" type="button" aria-label="最小化窗口" title="最小化">
           <i class="window-glyph minimize" aria-hidden="true"></i>
@@ -65,7 +65,7 @@
     <main class="shell">
       <header class="masthead">
         <div class="masthead-copy">
-          <h1>凛冬督学局 <span id="mode-title">· 背书模式</span></h1>
+          <h1>背书自习监督 <span id="mode-title">· 背书模式</span></h1>
           <p class="creator-credit">原作：叛逆蓝牙 · 二创：眼泪斷了线</p>
         </div>
         <div class="mode-switch" role="group" aria-label="学习模式">
@@ -130,6 +130,16 @@
               <span id="voice-threshold-label">抗噪幅度</span> <output id="voice-threshold-value">底噪 + 8 dB</output>
               <input id="voice-threshold-input" type="range" min="4" max="18" step="1" value="8" />
             </label>
+            <div class="microphone-row">
+              <label for="microphone-select">麦克风</label>
+              <div>
+                <select id="microphone-select" aria-label="选择麦克风">
+                  <option value="">系统默认麦克风</option>
+                </select>
+                <button id="refresh-microphones-button" class="button secondary" type="button">刷新</button>
+              </div>
+              <p id="microphone-status" role="status">选择后会用于测试、学习和声纹录入。</p>
+            </div>
             <div class="preflight-test-row">
               <button id="preflight-test-button" class="button secondary" type="button">测试当前设置</button>
               <p id="preflight-test-status" role="status" aria-live="polite">只检测，不计时、不提醒。</p>
@@ -137,7 +147,8 @@
             <div class="speaker-profile-row recite-only">
               <span id="speaker-profile-state" class="chip">正在加载声纹模型…</span>
               <div class="speaker-profile-actions">
-                <button id="speaker-enroll-button" class="button secondary" disabled>录入本人声音</button>
+                <select id="speaker-profile-select" aria-label="选择已保存的声纹" hidden></select>
+                <button id="speaker-enroll-button" class="button secondary" disabled>新增本人声纹</button>
                 <button id="speaker-delete-button" class="button secondary" hidden>删除声纹</button>
               </div>
             </div>

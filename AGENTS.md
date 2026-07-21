@@ -1,4 +1,4 @@
-# 凛冬督学局项目规则
+# 背书自习监督项目规则
 
 ## 基本工作准则
 
@@ -16,10 +16,10 @@
 ## 项目边界
 
 - 应用源码和交付物的权威根目录是 `D:\RedWatchRecite`。不要把源码重新镜像到 C 盘工作目录；用户要求应用内容保留在 D 盘。
-- 产品名固定为“凛冬督学局”；当前发布版本为 `1.8.0`，正式文件名为 `凛冬督学局.exe`。
+- 产品名固定为“背书自习监督”；当前本地版本为 `1.10.1`，交付物为 `背书自习监督-安装版-1.10.1.exe` 与 `背书自习监督-便携版-1.10.1.exe`。
 - 应用标题下固定显示“原作：叛逆蓝牙 · 二创：眼泪斷了线”；README 开头必须先显示同一署名。署名不等于素材授权，不得据此跳过资产权利核验。
 - GitHub 发布目标为 `bwai0640-arch/red-watch-recite`。提交者使用该账号对应的 GitHub `noreply` 邮箱；任何 push 或 Release 上传前都必须复查实际提交历史、个人信息、密钥与发布附件。
-- `docs/USER_GUIDE.md` 是用户说明的源码侧权威副本；发布时必须与 `dist/使用说明.md` 完全一致。
+- `docs/USER_GUIDE.md` 是用户说明的源码侧权威副本；本地安装包交付时必须复制为 `release-staging/使用说明.md` 并保持完全一致。
 - `renderer/scene-rules.js` 是自动动画顺序与随机池的唯一事实源，禁止在其他文件复制第二套业务规则。
 
 ## 不可破坏的产品规则
@@ -27,6 +27,7 @@
 - 只申请麦克风音频权限；禁止恢复摄像头、视频轨道、人脸或手机检测。
 - 只允许直接麦克风声纹录入；禁止恢复音频文件导入和网络注册。
 - 原始麦克风 PCM 只在内存处理，不得写盘或上传。
+- 用户选择的麦克风必须在待命测试、正式学习与声纹录入中共用；设备不可用时提示重新选择，禁止静默回退到其他设备。
 - 背书模式只有确认到本人声纹才清零静默计时，用户可在 20～60 秒内调节；VAD 只筛选疑似语音，不等同于本人判断。
 - 自习模式不要求声纹，按连续原始人声证据判断；阈值为 3～15 秒，必须忽略 VAD 尾音和键盘等短促瞬态。
 - 待命时允许在检测面板启动“当前设置测试”：必须复用正式检测链路和实时滑块，只做校准与判定，不启动会话、有效时钟、场景计划、音轨、提醒或学习记录；停止、开始学习、切换模式、录入声纹、最小化/隐藏窗口和退出时必须释放测试麦克风。
@@ -49,12 +50,13 @@
 
 ## 声纹与用户数据红线
 
-- `RedWatchReciteData` 可能包含真实用户数据。没有用户明确授权时，不读取声纹内容、不删除、不移动、不覆盖。
-- 便携版数据位于 EXE 同目录的 `RedWatchReciteData`；当前交付位置为 `dist/RedWatchReciteData`。
-- 开发版默认数据位于项目根 `RedWatchReciteData`，但测试必须通过 `PORTABLE_EXECUTABLE_DIR` 指向隔离目录。
-- `speaker-ui-test.mjs`、`adversarial-ui-test.mjs` 与 `mode-rest-ui-test.mjs` 只允许连接隔离实例，绝不能直接连接用户正在使用的 `dist/凛冬督学局.exe`。
+- `%APPDATA%\背书自习监督` 可能包含真实用户数据。没有用户明确授权时，不读取声纹内容、不删除、不移动、不覆盖。
+- 安装版唯一持久化的麦克风衍生数据是 `%APPDATA%\背书自习监督\speaker-profile.dat`；不自动读取、复制或迁移旧便携版的 `RedWatchReciteData`。
+- 开发和自动化测试必须通过 `SUPERVISION_DATA_DIR` 指向隔离目录。
+- `speaker-ui-test.mjs`、`adversarial-ui-test.mjs` 与 `mode-rest-ui-test.mjs` 只允许连接隔离实例，绝不能直接连接用户正在使用的安装版。
 - 不得提交、分享或打包真实 `speaker-profile.dat`。
-- 声纹档案 schema 当前为 2。修改模型、维度、样本结构或阈值时，必须同步审查 schema、迁移/强制重录策略和对抗测试。
+- 声纹档案 schema 当前为 3，最多保存 5 份同一用户的模板。schema 2 单份档案只能以内存形式映射为“原有声纹”，新增或删除模板时才写入 schema 3；修改模型、维度、样本结构或阈值时，必须同步审查迁移/强制重录策略和对抗测试。
+- 声纹特征必须以当前 Windows 用户的 DPAPI 加密后原子写入；不得用每次运行都会变化的 Electron 安全存储上下文加密。浏览器 `sessionData` 仍必须保持每次运行后清理。
 - `speaker-worker.js`、模型及 Sherpa 原生模块必须保持在 `asarUnpack` 中。
 
 ## 安全与进程边界
@@ -64,7 +66,7 @@
 - 主页面与休息提示页使用各自的最小 preload；两个窗口都必须拒绝新窗口和非预期导航。
 - 本地 `rwt://` 协议必须继续阻止目录穿越。
 - 麦克风权限只允许 `audio`，任何意外视频轨道都必须 fail closed。
-- 便携版运行期间出现多个 `凛冬督学局.exe` 是 Electron 辅助进程和 `%TEMP%` 解包结果，不等于存在多个发布版。
+- 安装版运行期间出现多个 `背书自习监督.exe` 是 Electron 渲染、GPU 等辅助进程，不等于磁盘上存在多个安装版或持久化缓存。
 
 ## 修改路由
 
@@ -74,7 +76,7 @@
 | 音轨启停或字幕 | `renderer/app.js` | `adversarial-ui-test.mjs`、用户说明 |
 | 双模式阈值、有效时长、休息券 | `renderer/study-policy.js` | `study-policy-test.cjs`、`mode-rest-ui-test.mjs`、用户说明 |
 | 待命检测测试 | `renderer/app.js`、`renderer/index.html` | `mode-rest-ui-test.mjs`、架构与用户说明 |
-| 声纹阈值或档案 | `speaker-service.js` | worker、schema、服务/UI 测试、隐私说明 |
+| 声纹阈值或档案 | `speaker-service.js`、`profile-crypto.js` | worker、schema、DPAPI 跨进程测试、服务/UI 测试、隐私说明 |
 | 音频质量或推理 | `speaker-worker.js` | `speaker-audio-test.cjs`、`speaker-service-test.cjs` |
 | 窗口/托盘/权限 | `main.js`、`preload.js` | CDP/UI 对抗测试、架构文档 |
 | 媒体资源 | `renderer/media/`、`catalog.json` | `media-runtime-test.mjs`、资产来源文档 |
@@ -85,10 +87,9 @@
 - 静态测试可使用工作区依赖定位结果中的 Node；当前 shell 不能假设 `node` 在 PATH。
 - UI/CDP 测试必须使用独立端口、隔离数据目录和全新实例。完整命令见 `docs/TESTING.md`。
 - 正式构建必须输出到 `release-staging`，不得让 electron-builder 清理含真实用户数据的 `dist`。
-- 发布前要求用户退出凛冬督学局；保留 `dist/RedWatchReciteData`，只替换正式 EXE 和同步后的说明书。
-- 重新打包后必须重新计算 EXE 大小与 SHA-256，并同步到 `docs/USER_GUIDE.md` 和 `dist/使用说明.md`。
-- `dist` 顶层最终只允许 `凛冬督学局.exe`、`使用说明.md`、`RedWatchReciteData` 三项；运行缓存允许存在于数据目录内部。
-- 不得把 `win-unpacked`、`builder-debug.yml`、旧版 EXE 或临时便携副本留在最终交付目录。
+- 发布前要求用户退出背书自习监督；不得覆盖旧 `dist` 或已安装应用。
+- 重新打包后必须重新计算安装版和便携版的大小与 SHA-256，并同步到 `docs/USER_GUIDE.md` 和 `release-staging/使用说明.md`。
+- 本地交付目录仅保留安装版、便携版和同步后的说明书；不得交付 `win-unpacked`、`builder-debug.yml`、旧版 EXE 或测试目录。
 
 ## 深入文档
 

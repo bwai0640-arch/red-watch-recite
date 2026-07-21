@@ -6,26 +6,51 @@ const {
   Tray,
   nativeImage,
   protocol,
-  safeStorage,
   screen,
   session,
 } = require('electron');
 const path = require('node:path');
+const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
+const { spawn } = require('node:child_process');
 const { SpeakerService } = require('./speaker-service');
+const { createProfileCrypto } = require('./profile-crypto');
 
 const presentationCanvas = { width: 1920, height: 1080 };
 const mainRendererUrl = 'rwt://renderer/index.html';
 const breakPromptRendererUrl = 'rwt://renderer/break-prompt.html';
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
-app.setName('凛冬督学局');
+app.commandLine.appendSwitch('disable-http-cache');
+app.setName('背书自习监督');
 
-const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR
-  || (app.isPackaged ? path.dirname(app.getPath('exe')) : __dirname);
-const userDataRoot = path.join(portableRoot, 'RedWatchReciteData');
-app.setPath('userData', userDataRoot);
-app.setPath('sessionData', path.join(userDataRoot, 'SessionData'));
+// Keep deliberately saved speaker data separate from Chromium's per-run files.
+const persistentDataRoot = process.env.SUPERVISION_DATA_DIR
+  || path.join(app.getPath('appData'), '背书自习监督');
+fsSync.mkdirSync(persistentDataRoot, { recursive: true });
+const transientSessionParent = path.join(persistentDataRoot, 'TransientElectronData');
+fsSync.mkdirSync(transientSessionParent, { recursive: true });
+
+for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: true })) {
+  if (!entry.isDirectory() || !/^run-(\d+)$/.test(entry.name)) continue;
+  const stalePid = Number(entry.name.slice('run-'.length));
+  let stillRunning = false;
+  try {
+    process.kill(stalePid, 0);
+    stillRunning = true;
+  } catch {}
+  if (!stillRunning) {
+    fsSync.rmSync(path.join(transientSessionParent, entry.name), { recursive: true, force: true });
+  }
+}
+
+const transientSessionDataRoot = path.join(transientSessionParent, `run-${process.pid}`);
+fsSync.mkdirSync(transientSessionDataRoot, { recursive: true });
+// Keep Electron's default, stable userData path for Windows safeStorage. Only
+// sessionData is per-run and cleaned on exit, so browser session caches do not
+// become durable application data.
+app.setPath('sessionData', transientSessionDataRoot);
+const runtimeSessionPartition = 'rwt-runtime';
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -48,6 +73,7 @@ let speakerService = null;
 let breakPromptWindow = null;
 let breakPromptState = null;
 let isDestroyingBreakPrompt = false;
+let runtimeSession = null;
 
 const speakerModelFile = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx';
 const breakPromptSize = Object.freeze({ width: 420, height: 220 });
@@ -66,8 +92,8 @@ const contentTypes = new Map([
   ['.ico', 'image/x-icon'],
 ]);
 
-function registerLocalProtocol() {
-  protocol.handle('rwt', async (request) => {
+function registerLocalProtocol(targetSession) {
+  targetSession.protocol.handle('rwt', async (request) => {
     const url = new URL(request.url);
     const roots = { renderer: path.join(__dirname, 'renderer') };
     const root = roots[url.hostname];
@@ -183,16 +209,19 @@ function createBreakPromptWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
-    title: '凛冬督学局 · 休息券',
+    title: '背书自习监督 · 休息券',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#160c0b',
     webPreferences: {
       preload: path.join(__dirname, 'break-prompt-preload.js'),
+      session: runtimeSession,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: false,
+      spellcheck: false,
+      v8CacheOptions: 'none',
     },
   });
   breakPromptWindow = prompt;
@@ -261,16 +290,19 @@ function createMainWindow() {
     fullscreen: false,
     frame: false,
     show: false,
-    title: '凛冬督学局',
+    title: '背书自习监督',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#120c0b',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
+      session: runtimeSession,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: false,
+      spellcheck: false,
+      v8CacheOptions: 'none',
     },
   });
 
@@ -384,6 +416,43 @@ function runtimeWindowState() {
   };
 }
 
+function runtimeCacheState() {
+  return {
+    inMemory: Boolean(runtimeSession) && runtimeSession.getStoragePath() === null,
+    httpCacheDisabled: true,
+    v8CacheDisabled: true,
+  };
+}
+
+function clearTransientSessionData() {
+  try {
+    fsSync.rmSync(transientSessionDataRoot, { recursive: true, force: true });
+    fsSync.rmdirSync(transientSessionParent);
+  } catch (error) {
+    if (error?.code !== 'ENOTEMPTY' && error?.code !== 'ENOENT') {
+      console.warn('[cache] unable to remove transient session data:', error?.message || error);
+    }
+  }
+}
+
+function scheduleTransientSessionDataCleanup() {
+  try {
+    const child = spawn(
+      process.execPath,
+      [path.join(__dirname, 'cache-cleanup.js'), transientSessionDataRoot, String(process.pid)],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      },
+    );
+    child.unref();
+  } catch (error) {
+    console.warn('[cache] unable to schedule transient session cleanup:', error?.message || error);
+  }
+}
+
 function minimizeMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
   mainWindow.minimize();
@@ -401,7 +470,7 @@ function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'icon.ico');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('凛冬督学局');
+  tray.setToolTip('背书自习监督');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开督学场景', click: showSceneWindow },
     { label: '隐藏到后台', click: hideToBackground },
@@ -470,12 +539,12 @@ function registerSpeakerIpc() {
   };
 
   ipcMain.handle('speaker:get-state', trustedHandler(() => speakerService.getState()));
-  ipcMain.handle('speaker:begin-enrollment', trustedHandler(() => speakerService.beginEnrollment()));
+  ipcMain.handle('speaker:begin-enrollment', trustedHandler((payload) => speakerService.beginEnrollment(payload)));
   ipcMain.handle('speaker:add-enrollment-sample', trustedHandler((payload) => speakerService.addEnrollmentSample(payload)));
   ipcMain.handle('speaker:finish-enrollment', trustedHandler(() => speakerService.finishEnrollment()));
   ipcMain.handle('speaker:cancel-enrollment', trustedHandler(() => speakerService.cancelEnrollment()));
   ipcMain.handle('speaker:verify', trustedHandler((payload) => speakerService.verify(payload)));
-  ipcMain.handle('speaker:delete-profile', trustedHandler(() => speakerService.deleteProfile()));
+  ipcMain.handle('speaker:delete-profile', trustedHandler((payload) => speakerService.deleteProfile(payload?.profileId)));
 }
 
 function registerBreakPromptIpc() {
@@ -512,15 +581,16 @@ function registerBreakPromptIpc() {
 }
 
 app.whenReady().then(async () => {
-  registerLocalProtocol();
-  session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => (
+  runtimeSession = session.fromPartition(runtimeSessionPartition, { cache: false });
+  registerLocalProtocol(runtimeSession);
+  runtimeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => (
     permission === 'media'
     && details?.mediaType === 'audio'
       && webContents?.getURL() === mainRendererUrl
     && typeof requestingOrigin === 'string'
     && requestingOrigin.startsWith('rwt://renderer')
   ));
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+  runtimeSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
     callback(
       permission === 'media'
@@ -538,14 +608,15 @@ app.whenReady().then(async () => {
   ipcMain.handle('finish-inline-alert', trustedRendererHandler((_event, payload) => finishInlineAlert(payload)));
   ipcMain.handle('get-animation-canvas', trustedRendererHandler(() => ({ ...presentationCanvas, windowMode: mainWindowMode })));
   ipcMain.handle('get-runtime-window-state', trustedRendererHandler(() => runtimeWindowState()));
+  ipcMain.handle('get-runtime-cache-state', trustedRendererHandler(() => runtimeCacheState()));
   ipcMain.handle('quit-app', trustedRendererHandler(() => quitApp()));
   registerBreakPromptIpc();
 
   speakerService = new SpeakerService({
     workerPath: unpackedResourcePath('speaker-worker.js'),
     modelPath: unpackedResourcePath('models', speakerModelFile),
-    dataRoot: userDataRoot,
-    safeStorage,
+    dataRoot: persistentDataRoot,
+    profileCrypto: createProfileCrypto(),
   });
   registerSpeakerIpc();
   const speakerState = await speakerService.initialize();
@@ -560,5 +631,7 @@ app.on('before-quit', () => {
   destroyBreakPromptWindow();
   speakerService?.dispose().catch(() => {});
 });
+app.on('will-quit', clearTransientSessionData);
+app.on('will-quit', scheduleTransientSessionDataCleanup);
 app.on('window-all-closed', () => {});
 app.on('activate', showSceneWindow);

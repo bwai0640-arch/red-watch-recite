@@ -366,7 +366,7 @@ try {
   }))()`);
   console.error('[adversarial] initial report', JSON.stringify(report.initial));
   assert(report.initial.session === '待命' && report.initial.startText === '开始学习', 'App does not open at 开始学习');
-  assert(report.initial.title === '凛冬督学局', 'Product title was not renamed');
+  assert(report.initial.title === '背书自习监督', 'Product title was not renamed');
   assert(report.initial.timer === '00:00', 'Initial timer is not zero');
   assert(report.initial.clip === 'E1_enter_walk' && report.initial.frame === '0' && report.initial.playback === 'held', 'Initial empty-room frame is wrong');
   assert(report.initial.alertHidden, 'Reminder is visible before Start');

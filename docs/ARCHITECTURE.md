@@ -1,8 +1,8 @@
-# 凛冬督学局架构
+# 背书自习监督架构
 
 ## 目标与边界
 
-“凛冬督学局”是 Windows x64 便携 Electron 应用。背书模式在本机采集麦克风 PCM，先筛选疑似语音活动，再用本地声纹模型验证说话者；只有确认是登记用户时才重置静默计时。自习模式不使用声纹，只判断连续的原始人声证据。
+“背书自习监督”是 Windows x64 本地安装 Electron 应用。背书模式在本机采集麦克风 PCM，先筛选疑似语音活动，再用本地声纹模型验证说话者；只有确认是登记用户时才重置静默计时。自习模式不使用声纹，只判断连续的原始人声证据。
 
 应用不使用摄像头、不保存原始录音、不上传声纹或 PCM，也不依赖网络账号。当前方案不做活体或本人录音防重放。
 
@@ -23,7 +23,8 @@ flowchart LR
 - `main.js` 创建一个主 `BrowserWindow`，获得休息券或正在休息时最多再创建一个 420×220 提示窗；它还管理托盘、窗口模式、权限、`rwt://renderer` 协议和声纹服务。
 - `preload.js` 只向主页面暴露窗口、声纹和休息提示控制；`break-prompt-preload.js` 只向休息提示页暴露两个提示动作。两个渲染器都没有 Node.js 权限。
 - 所有 IPC 都同时核对具体窗口的 `webContents`、主 frame 与精确 `rwt://renderer` URL；两个窗口都拒绝 `window.open`、子 frame 导航和非预期主导航。
-- `speaker-service.js` 串行化声纹操作，校验 profile，使用 Electron `safeStorage` 加密并原子写入。
+- `speaker-service.js` 串行化声纹操作，校验 profile，使用当前 Windows 用户的 DPAPI 加密并原子写入。
+- `profile-crypto.js` 只通过隐藏的本地 PowerShell 子进程调用 Windows `ProtectedData`；声纹明文以 Base64 写入子进程标准输入，不出现在命令行、文件或日志中。
 - `speaker-worker.js` 在线程中运行 Sherpa/CAM++，避免推理阻塞渲染与动画。
 - `renderer/app.js` 持有双模式会话、VAD、声纹复核、休息流程、窗口模式与动画播放状态。
 - `renderer/study-policy.js` 是阈值范围、有效学习时钟、休息/表扬里程碑和自习连续人声判定的唯一事实源。
@@ -38,7 +39,7 @@ flowchart LR
     Windows --> Embed["CAM++ embeddings"]
     Embed --> Rank["rank by pairwise consistency"]
     Rank --> Keep["keep best 6"]
-    Keep --> Encrypt["schema 2 encrypted profile"]
+    Keep --> Encrypt["schema 3 encrypted profiles"]
 ```
 
 - 唯一合法来源是 `mic`。
@@ -46,7 +47,7 @@ flowchart LR
 - 8 个候选按与其他候选的平均余弦相似度排序，保留前 6 个。
 - 每个保留向量必须与其余 5 个向量的质心达到 0.50 一致性阈值。
 - 档案保存模型哈希、维度、创建时间、阈值和 6 个嵌入，不保存 WAV、PCM 或其他原始录音。
-- schema 不是 2、模型哈希/维度不符或文件损坏时 fail closed，并要求重新录入。
+- schema 不是 2 或 3、模型哈希/维度不符或文件损坏时 fail closed，并要求重新录入。schema 2 单份档案在内存中映射为“原有声纹”；只有新增或删除模板时才原子写入 schema 3。
 
 ## 运行时检测与学习策略
 
@@ -141,15 +142,11 @@ flowchart LR
 
 ## 数据位置
 
-`portableRoot` 的优先级为：
+数据根为 `%APPDATA%/背书自习监督`；自动化测试可通过 `SUPERVISION_DATA_DIR` 指向隔离目录。
 
-1. 环境变量 `PORTABLE_EXECUTABLE_DIR`。
-2. 打包后 EXE 所在目录。
-3. 开发模式项目根目录。
-
-数据根为 `<portableRoot>/RedWatchReciteData`：
-
-- `speaker-profile.dat`：Windows `safeStorage` 加密的声纹特征。
-- `SessionData/`、`Code Cache/` 等：Electron/Chromium 运行缓存。
+- `speaker-profile.dat`：Windows DPAPI（当前 Windows 用户）加密的声纹特征，是唯一由本应用持久保存的麦克风衍生数据；schema 3 最多保存 5 份同一用户的模板。所选麦克风的设备标识只保存在本机设置中，测试、正式学习和录入共用该设备。
+- 主场景和休息提示共享 `rwt-runtime` 非持久会话，并以 `cache: false` 创建；两个窗口的 V8 代码缓存也被禁用。因此该会话的 `storagePath` 为 `null`，不会写出 `SessionData/`、`Code Cache/`、`GPUCache/` 等 Chromium 浏览器缓存。
+- Electron 默认会话的必要临时目录位于数据根内的 `TransientElectronData/run-<pid>/`。每次启动会清理已退出进程留下的运行目录；正常 `will-quit` 时还会启动一个最小 Node 清理器，待主进程退出后删除本次运行目录。该目录不是用户数据，不能与 `speaker-profile.dat` 一起保留或发布。
+- 首次安装不会自动接触旧便携版的 `RedWatchReciteData`；如需继续使用背书模式，用户在新安装版中重新录入声纹。
 
 任何测试和构建都必须避免覆盖真实用户数据。

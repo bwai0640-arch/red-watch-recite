@@ -13,10 +13,10 @@ const dataRoot = path.join(root, 'work', 'speaker-service-test-data');
 const fixtures = path.join(root, 'work', 'speaker-fixtures');
 const modelPath = path.join(root, 'models', '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx');
 const workerPath = path.join(root, 'speaker-worker.js');
-const safeStorage = {
-  isEncryptionAvailable: () => true,
-  encryptString: (value) => Buffer.from(value, 'utf8'),
-  decryptString: (value) => Buffer.from(value).toString('utf8'),
+const profileCrypto = {
+  isAvailable: async () => true,
+  encryptString: async (value) => Buffer.from(value, 'utf8'),
+  decryptString: async (value) => Buffer.from(value).toString('utf8'),
 };
 
 function wave(name) {
@@ -57,7 +57,7 @@ async function enrollOwner(service) {
 
 async function run() {
   await fsp.rm(dataRoot, { recursive: true, force: true });
-  const service = new SpeakerService({ workerPath, modelPath, dataRoot, safeStorage });
+  const service = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
   let state = await service.initialize();
   assert.equal(state.ready, true);
   assert.equal(state.profileExists, false);
@@ -74,6 +74,7 @@ async function run() {
   await enrollOwner(service);
   state = await service.finishEnrollment();
   assert.equal(state.profileExists, true);
+  assert.equal(state.profileCount, 1);
 
   const owner = await service.verify(wave('fangjun-test-sr-1.wav'));
   const other = await service.verify(wave('leijun-test-sr-1.wav'));
@@ -86,19 +87,22 @@ async function run() {
   assert.deepEqual(files, ['speaker-profile.dat']);
   assert.equal(files.some((name) => /\.(wav|pcm|mp3|m4a)$/iu.test(name)), false);
   const storedProfile = JSON.parse(await fsp.readFile(path.join(dataRoot, 'speaker-profile.dat'), 'utf8'));
-  assert.equal(storedProfile.schemaVersion, 2);
-  assert.equal(storedProfile.embeddings.length, 6);
+  assert.equal(storedProfile.schemaVersion, 3);
+  assert.equal(storedProfile.profiles.length, 1);
+  assert.equal(storedProfile.profiles[0].embeddings.length, 6);
 
-  // Overwrite the same profile path to exercise Windows atomic replacement.
+  // A second local template is retained instead of replacing the first one.
   await service.beginEnrollment();
   await enrollOwner(service);
-  await service.finishEnrollment();
+  state = await service.finishEnrollment();
+  assert.equal(state.profileCount, 2);
   await service.dispose();
 
-  const reloaded = new SpeakerService({ workerPath, modelPath, dataRoot, safeStorage });
+  const reloaded = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
   state = await reloaded.initialize();
   assert.equal(state.ready, true);
   assert.equal(state.profileExists, true);
+  assert.equal(state.profileCount, 2);
   assert.equal((await reloaded.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
 
   // The robust 8 -> 6 selector must discard up to two contaminated candidates.
@@ -109,15 +113,40 @@ async function run() {
     'leijun-sr-1.wav', 'leijun-sr-2.wav',
   ]) await add(reloaded, 'mic', name);
   await reloaded.finishEnrollment();
+  state = reloaded.getState();
+  assert.equal(state.profileCount, 3);
   assert.equal((await reloaded.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
   assert.equal((await reloaded.verify(wave('leijun-test-sr-1.wav'))).matched, false);
 
-  await reloaded.deleteProfile();
+  await reloaded.deleteProfile(state.profiles[0].id);
+  state = reloaded.getState();
+  assert.equal(state.profileCount, 2);
+  assert.equal((await reloaded.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
+  for (const profile of [...state.profiles]) await reloaded.deleteProfile(profile.id);
   assert.equal(fs.existsSync(path.join(dataRoot, 'speaker-profile.dat')), false);
   await reloaded.dispose();
 
+  const legacyProfile = {
+    schemaVersion: 2,
+    modelHash: storedProfile.modelHash,
+    dimension: storedProfile.dimension,
+    createdAt: storedProfile.profiles[0].createdAt,
+    threshold: storedProfile.threshold,
+    strongThreshold: storedProfile.strongThreshold,
+    embeddings: storedProfile.profiles[0].embeddings,
+  };
+  await fsp.writeFile(path.join(dataRoot, 'speaker-profile.dat'), JSON.stringify(legacyProfile));
+  const legacy = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
+  state = await legacy.initialize();
+  assert.equal(state.profileExists, true);
+  assert.equal(state.profileCount, 1);
+  assert.equal(state.profiles[0].label, '原有声纹');
+  assert.equal((await legacy.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
+  await legacy.deleteProfile(state.profiles[0].id);
+  await legacy.dispose();
+
   await fsp.writeFile(path.join(dataRoot, 'speaker-profile.dat'), Buffer.from('{broken'));
-  const corrupted = new SpeakerService({ workerPath, modelPath, dataRoot, safeStorage });
+  const corrupted = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
   state = await corrupted.initialize();
   assert.equal(state.ready, true);
   assert.equal(state.profileExists, false);
@@ -136,6 +165,8 @@ async function run() {
     fanOnlyEnrollmentRejected: true,
     profileReloaded: true,
     contaminatedCandidatesDropped: true,
+    multipleProfilesRetained: true,
+    legacyProfileMigratedInMemory: true,
     corruptProfileFailedClosed: true,
   }));
 }

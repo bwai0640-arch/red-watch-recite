@@ -387,7 +387,7 @@ const isolatedRoot = fs.mkdtempSync(path.join(workRoot, 'mode-rest-ui-'));
 const debugPort = await reserveDebugPort();
 const childEnvironment = {
   ...process.env,
-  PORTABLE_EXECUTABLE_DIR: isolatedRoot,
+  SUPERVISION_DATA_DIR: isolatedRoot,
 };
 delete childEnvironment.ELECTRON_RUN_AS_NODE;
 
@@ -448,13 +448,16 @@ try {
     creatorCredit: document.querySelector('.creator-credit')?.textContent.trim(),
     mode: window.__beishuTest.getSnapshot().mode,
     hasBreakPromptBridge: Boolean(window.breakPrompt),
-    runtime: await window.desktopAPI.getRuntimeWindowState()
+    runtime: await window.desktopAPI.getRuntimeWindowState(),
+    cache: await window.desktopAPI.getRuntimeCacheState()
   }))()`);
-  assert(report.initial.documentTitle === '凛冬督学局', `Unexpected product title: ${report.initial.documentTitle}`);
-  assert(report.initial.heading === '凛冬督学局', `Unexpected product heading: ${report.initial.heading}`);
+  assert(report.initial.documentTitle === '背书自习监督', `Unexpected product title: ${report.initial.documentTitle}`);
+  assert(report.initial.heading === '背书自习监督', `Unexpected product heading: ${report.initial.heading}`);
   assert(report.initial.creatorCredit === '原作：叛逆蓝牙 · 二创：眼泪斷了线',
     `Creator attribution is missing or wrong: ${report.initial.creatorCredit}`);
   assert(report.initial.runtime.windowCount === 1, 'Fresh source instance did not start with one window');
+  assert(report.initial.cache.inMemory && report.initial.cache.httpCacheDisabled && report.initial.cache.v8CacheDisabled,
+    `Runtime cache policy is not memory-only: ${JSON.stringify(report.initial.cache)}`);
   assert(report.initial.runtime.minimumSize?.width === 960
     && report.initial.runtime.minimumSize?.height === 540,
     `Unexpected native minimum window size: ${JSON.stringify(report.initial.runtime.minimumSize)}`);
@@ -830,6 +833,26 @@ try {
         return destination.stream;
       }
     });
+    Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
+      configurable: true,
+      value: async () => [
+        { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+        { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
+      ],
+    });
+    await refreshMicrophones({ requestPermission: true });
+    const microphone = document.querySelector('#microphone-select');
+    microphone.value = 'mic-b';
+    microphone.dispatchEvent(new Event('change', { bubbles: true }));
+    window.__microphoneSelection = {
+      options: [...microphone.options].map((option) => ({ value: option.value, text: option.textContent.trim() })),
+      selected: microphone.value,
+      settings: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).microphoneDeviceId,
+      constraints: microphoneConstraints(),
+    };
+    window.__gumCalls = [];
+    window.__gumStreams = [];
+    window.__gumRequests = [];
     document.querySelector('#recite-mode-button').click();
     const button = document.querySelector('#preflight-test-button');
     button.click();
@@ -852,6 +875,13 @@ try {
     && report.preflightWithoutVoiceprint.status.includes('请先录入本人声音')
     && report.preflightWithoutVoiceprint.gumCalls === 0,
   `Missing-voiceprint preflight was misleading or requested the microphone: ${JSON.stringify(report.preflightWithoutVoiceprint)}`);
+  report.microphoneSelection = await main.evaluate(`window.__microphoneSelection`);
+  assert(report.microphoneSelection.selected === 'mic-b'
+    && report.microphoneSelection.settings === 'mic-b'
+    && report.microphoneSelection.options.length === 3
+    && report.microphoneSelection.constraints.audio.deviceId.exact === 'mic-b'
+    && report.microphoneSelection.constraints.video === false,
+  `Microphone selection was not persisted or applied: ${JSON.stringify(report.microphoneSelection)}`);
 
   report.preflightStarted = await main.evaluate(`(async () => {
     document.querySelector('#study-mode-button').click();
@@ -895,6 +925,7 @@ try {
   })()`);
   assert(Boolean(report.preflightCalibrated.gum?.constraints?.audio)
     && report.preflightCalibrated.gum?.constraints?.video === false
+    && report.preflightCalibrated.gum?.constraints?.audio?.deviceId?.exact === 'mic-b'
     && report.preflightCalibrated.gum.liveBeforeRequest === 0
     && report.preflightCalibrated.audioTracks === 1
     && report.preflightCalibrated.videoTracks === 0

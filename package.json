@@ -1,14 +1,15 @@
 {
   "name": "red-watch-recite",
-  "version": "1.8.0",
-  "description": "凛冬督学局：本地背书与安静自习监督桌面应用",
+  "version": "1.10.1",
+  "description": "背书自习监督：本地背书与安静自习监督桌面应用",
   "main": "main.js",
   "author": "原作：叛逆蓝牙 · 二创：眼泪斷了线",
   "license": "UNLICENSED",
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win nsis",
+    "dist:installer": "electron-builder --win nsis"
   },
   "dependencies": {
     "sherpa-onnx-node": "1.13.4"
@@ -18,8 +19,8 @@
     "electron-builder": "26.15.3"
   },
   "build": {
-    "appId": "top.redwatch.recite",
-    "productName": "凛冬督学局",
+    "appId": "top.redwatch.study-supervisor",
+    "productName": "背书自习监督",
     "electronDist": "node_modules/electron/dist",
     "asar": true,
     "directories": {
@@ -27,7 +28,9 @@
     },
     "files": [
       "main.js",
+      "cache-cleanup.js",
       "preload.js",
+      "profile-crypto.js",
       "break-prompt-preload.js",
       "speaker-service.js",
       "speaker-worker.js",
@@ -47,14 +50,23 @@
     "win": {
       "target": [
         {
-          "target": "portable",
+          "target": "nsis",
           "arch": [
             "x64"
           ]
         }
       ],
       "icon": "assets/icon.ico",
-      "artifactName": "凛冬督学局.exe"
+      "artifactName": "背书自习监督-安装版-${version}.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "背书自习监督",
+      "deleteAppDataOnUninstall": false
     }
   }
 }

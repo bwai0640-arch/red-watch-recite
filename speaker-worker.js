@@ -19,8 +19,7 @@ const MIN_ENROLLMENT_DB_SPREAD = 6;
 
 let extractor = null;
 let manager = null;
-let enrolledEmbeddings = [];
-let enrolledCentroid = null;
+let enrolledProfiles = [];
 let initializationError = null;
 
 function serviceError(code, message) {
@@ -172,32 +171,40 @@ function extractEmbedding(payload, options = {}) {
   return { embedding: Float32Array.from(embedding), quality };
 }
 
-function setProfile(payload) {
+function setProfiles(payload) {
   ensureInitialized();
-  if (!Array.isArray(payload?.embeddings) || payload.embeddings.length < 1 || payload.embeddings.length > 8) {
-    throw serviceError('INVALID_PROFILE', '声纹档案中的样本数量无效。');
+  if (!Array.isArray(payload?.profiles) || payload.profiles.length < 1 || payload.profiles.length > 5) {
+    throw serviceError('INVALID_PROFILE', '声纹档案数量无效。');
   }
-  const embeddings = payload.embeddings.map(validateEmbedding);
+  const profiles = payload.profiles.map((profile) => {
+    if (!profile || typeof profile.id !== 'string'
+      || !Array.isArray(profile.embeddings)
+      || profile.embeddings.length < 1
+      || profile.embeddings.length > 8) {
+      throw serviceError('INVALID_PROFILE', '声纹档案中的样本数量无效。');
+    }
+    const embeddings = profile.embeddings.map(validateEmbedding);
+    return { id: profile.id, embeddings, centroid: centroid(embeddings) };
+  });
   const nextManager = new (require('sherpa-onnx-node').SpeakerEmbeddingManager)(extractor.dim);
-  if (!nextManager.addMulti({ name: OWNER_NAME, v: embeddings })) {
+  const allEmbeddings = profiles.flatMap((profile) => profile.embeddings);
+  if (!nextManager.addMulti({ name: OWNER_NAME, v: allEmbeddings })) {
     throw serviceError('PROFILE_LOAD_FAILED', '无法载入本人声纹。');
   }
   manager = nextManager;
-  enrolledEmbeddings = embeddings.map((embedding) => Float32Array.from(embedding));
-  enrolledCentroid = centroid(enrolledEmbeddings);
-  return { count: enrolledEmbeddings.length };
+  enrolledProfiles = profiles;
+  return { count: profiles.length, samples: allEmbeddings.length };
 }
 
 function clearProfile() {
   manager = null;
-  enrolledEmbeddings = [];
-  enrolledCentroid = null;
+  enrolledProfiles = [];
   return { cleared: true };
 }
 
 function verify(payload) {
   ensureInitialized();
-  if (!manager || !enrolledCentroid) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
+  if (!manager || !enrolledProfiles.length) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
   const threshold = Number(payload?.threshold);
   const strongThreshold = Number(payload?.strongThreshold);
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1
@@ -206,12 +213,18 @@ function verify(payload) {
   }
 
   const { embedding, quality } = extractEmbedding(payload);
-  const score = cosineSimilarity(embedding, enrolledCentroid);
+  const scoredProfiles = enrolledProfiles.map((profile) => ({
+    id: profile.id,
+    score: cosineSimilarity(embedding, profile.centroid),
+  })).sort((left, right) => right.score - left.score);
+  const bestProfile = scoredProfiles[0];
+  const score = bestProfile.score;
   const managerMatched = manager.verify({ name: OWNER_NAME, v: embedding, threshold });
   const matched = Boolean(managerMatched && score >= threshold);
   return {
     matched,
     score,
+    profileId: bestProfile.id,
     strongMatch: Boolean(matched && score >= strongThreshold),
     quality,
   };
@@ -244,7 +257,7 @@ const handlers = {
   extract(payload) {
     return extractEmbedding(payload, { requireSpeechDynamics: true });
   },
-  setProfile,
+  setProfiles,
   clearProfile,
   verify,
 };
