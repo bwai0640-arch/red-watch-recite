@@ -110,10 +110,6 @@
       0,
       1,
     );
-    const levelDeltaDb = Number(options.levelDeltaDb);
-    const sensitivityDb = normalizeQuietSensitivityDb(options.sensitivityDb);
-    const aboveLevelThreshold = !Number.isFinite(levelDeltaDb) || levelDeltaDb >= sensitivityDb;
-
     let topMedia = { name: '', probability: 0 };
     let secondaryMedia = { name: '', probability: 0 };
     let topBroadcast = { name: '', probability: 0 };
@@ -141,7 +137,7 @@
     const keyboardMixedMediaEvidence = keyboardEvidence
       && topMedia.probability >= keyboardMixedMediaThreshold
       && secondaryMedia.probability >= keyboardMixedMediaSecondaryThreshold;
-    const mediaEvidence = aboveLevelThreshold && (
+    const mediaEvidence = (
       topMedia.probability >= mediaThreshold
       || topBroadcast.probability >= broadcastThreshold
       || keyboardMixedMediaEvidence
@@ -151,7 +147,6 @@
       keyboardEvidence,
       keyboardOnly: keyboardEvidence && !mediaEvidence,
       keyboardMixedMediaEvidence,
-      aboveLevelThreshold,
       mediaScore: topMedia.probability,
       mediaLabel: topMedia.name,
       secondaryMediaScore: secondaryMedia.probability,

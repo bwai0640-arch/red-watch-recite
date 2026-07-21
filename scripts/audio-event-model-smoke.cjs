@@ -52,6 +52,22 @@ function syntheticKeyboard() {
   return result;
 }
 
+function syntheticSteadyFan(targetRms) {
+  const result = new Float32Array(WINDOW_SAMPLES);
+  let seed = 0x6d2b79f5;
+  for (let index = 0; index < result.length; index += 1) {
+    seed = (1664525 * seed + 1013904223) >>> 0;
+    const noise = (seed / 0x100000000) * 2 - 1;
+    const time = index / SAMPLE_RATE;
+    const hum = (0.62 * Math.sin(2 * Math.PI * 50 * time))
+      + (0.24 * Math.sin(2 * Math.PI * 100 * time))
+      + (0.14 * Math.sin(2 * Math.PI * 170 * time));
+    const slowModulation = 0.82 + (0.18 * Math.sin(2 * Math.PI * 0.7 * time));
+    result[index] = ((0.78 * hum) + (0.22 * noise)) * slowModulation;
+  }
+  return normalizeRms(result, targetRms);
+}
+
 function mixWithPeakRatio(media, keyboard, keyboardAboveMediaDb) {
   const mediaRms = 0.035;
   const normalizedMedia = normalizeRms(media, mediaRms);
@@ -100,7 +116,7 @@ function readWindow(filePath, offsetSeconds = 0) {
 }
 
 function policyDecision(events) {
-  return classifyStudyAudioEvents(events, { levelDeltaDb: 20, sensitivityDb: 10 });
+  return classifyStudyAudioEvents(events);
 }
 
 async function main() {
@@ -121,10 +137,25 @@ async function main() {
     const keyboardResult = await service.classify({ samples: keyboard, sampleRate: SAMPLE_RATE });
     assert.equal(policyDecision(keyboardResult.events).mediaEvidence, false, 'synthetic keyboard became media evidence');
 
+    const steadyNoiseFixtures = [];
+    for (const targetRms of [0.001, 0.01, 0.1]) {
+      const fanResult = await service.classify({
+        samples: syntheticSteadyFan(targetRms),
+        sampleRate: SAMPLE_RATE,
+      });
+      assert.equal(
+        policyDecision(fanResult.events).mediaEvidence,
+        false,
+        `steady fan at RMS ${targetRms} became media evidence`,
+      );
+      steadyNoiseFixtures.push({ targetRms, top: fanResult.events.slice(0, 5) });
+    }
+
     const report = {
       silenceTop: silence.events.slice(0, 5),
       returnedEventCount: silence.events.length,
       keyboardTop: keyboardResult.events.slice(0, 8),
+      steadyNoiseFixtures,
       mediaFixtures: [],
       speechFixture: null,
       realKeyboardFixtures: [],

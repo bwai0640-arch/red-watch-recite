@@ -354,6 +354,30 @@ async function completePreflightCalibration(client) {
   );
 }
 
+async function waitForDirectStudyDetection(client, { preflight = false } = {}) {
+  return waitForEvaluation(
+    client,
+    `({
+      snapshot: window.__beishuTest.getSnapshot(),
+      vadState: document.body.dataset.vadState,
+      hasVad: Boolean(state.vad),
+      silenceArmed: state.silenceArmed
+    })`,
+    (value) => value.snapshot.mode === 'study'
+      && value.vadState === 'ready'
+      && !value.snapshot.calibrating
+      && !value.hasVad
+      && value.silenceArmed
+      && (preflight
+        ? value.snapshot.preflightTesting
+          && !value.snapshot.active
+          && value.snapshot.sessionPhase === 'idle'
+        : value.snapshot.active
+          && value.snapshot.introComplete
+          && value.snapshot.sessionPhase === 'studying'),
+  );
+}
+
 function waitForProcessExit(child, timeout = 10_000) {
   if (child.exitCode !== null) return Promise.resolve(child.exitCode);
   return new Promise((resolve, reject) => {
@@ -611,6 +635,10 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
+      liveThresholdHidden: document.querySelector('#live-volume-threshold').hidden,
+      detailThresholdHidden: document.querySelector('#volume-threshold').hidden,
+      thresholdSettingHidden: document.querySelector('#voice-threshold-input').closest('label').hidden,
+      recalibrateHidden: document.querySelector('#recalibrate-button').hidden,
     };
     document.querySelector('#recite-mode-button').click();
     const recite = {
@@ -619,17 +647,31 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
+      liveThresholdHidden: document.querySelector('#live-volume-threshold').hidden,
+      detailThresholdHidden: document.querySelector('#volume-threshold').hidden,
+      thresholdSettingHidden: document.querySelector('#voice-threshold-input').closest('label').hidden,
+      recalibrateHidden: document.querySelector('#recalibrate-button').hidden,
     };
     return { study, recite };
   })()`);
   assert(report.modeSwitch.study.mode === 'study'
     && report.modeSwitch.study.title.includes('自习')
     && report.modeSwitch.study.recitePressed === 'false'
-    && report.modeSwitch.study.studyPressed === 'true', 'Switching to study mode failed');
+    && report.modeSwitch.study.studyPressed === 'true'
+    && report.modeSwitch.study.liveThresholdHidden
+    && report.modeSwitch.study.detailThresholdHidden
+    && report.modeSwitch.study.thresholdSettingHidden
+    && report.modeSwitch.study.recalibrateHidden,
+  `Switching to study mode did not hide recite-only threshold controls: ${JSON.stringify(report.modeSwitch.study)}`);
   assert(report.modeSwitch.recite.mode === 'recite'
     && report.modeSwitch.recite.title.includes('背书')
     && report.modeSwitch.recite.recitePressed === 'true'
-    && report.modeSwitch.recite.studyPressed === 'false', 'Switching back to recite mode failed');
+    && report.modeSwitch.recite.studyPressed === 'false'
+    && !report.modeSwitch.recite.liveThresholdHidden
+    && !report.modeSwitch.recite.detailThresholdHidden
+    && !report.modeSwitch.recite.thresholdSettingHidden
+    && !report.modeSwitch.recite.recalibrateHidden,
+  `Switching back to recite mode did not restore recite-only threshold controls: ${JSON.stringify(report.modeSwitch.recite)}`);
 
   report.collapsedThresholdDrag = await main.evaluate(`(() => {
     const marker = document.querySelector('#live-volume-threshold');
@@ -904,14 +946,17 @@ try {
     && !report.preflightStarted.snapshot.active
     && report.preflightStarted.snapshot.sessionPhase === 'idle',
   `Study preflight did not start in idle mode: ${JSON.stringify(report.preflightStarted)}`);
-  await completePreflightCalibration(main);
+  await waitForDirectStudyDetection(main, { preflight: true });
   const preflightElapsedBefore = await main.evaluate(`window.__beishuTest.getSnapshot().effectiveElapsedMs`);
   await wait(300);
-  report.preflightCalibrated = await main.evaluate(`(() => {
+  report.preflightReady = await main.evaluate(`(() => {
     const snapshot = window.__beishuTest.getSnapshot();
     const stream = window.__gumStreams[0];
     return {
       snapshot,
+      hasVad: Boolean(state.vad),
+      silenceArmed: state.silenceArmed,
+      vadState: document.body.dataset.vadState,
       gum: window.__gumRequests[0],
       audioTracks: stream?.getAudioTracks().length || 0,
       videoTracks: stream?.getVideoTracks().length || 0,
@@ -923,76 +968,63 @@ try {
       status: document.querySelector('#preflight-test-status').textContent.trim(),
     };
   })()`);
-  assert(Boolean(report.preflightCalibrated.gum?.constraints?.audio)
-    && report.preflightCalibrated.gum?.constraints?.video === false
-    && report.preflightCalibrated.gum?.constraints?.audio?.deviceId?.exact === 'mic-b'
-    && report.preflightCalibrated.gum.liveBeforeRequest === 0
-    && report.preflightCalibrated.audioTracks === 1
-    && report.preflightCalibrated.videoTracks === 0
-    && report.preflightCalibrated.liveTracks === 1,
-  `Study preflight microphone was not a single audio-only stream: ${JSON.stringify(report.preflightCalibrated)}`);
-  assert(report.preflightCalibrated.snapshot.preflightTesting
-    && report.preflightCalibrated.snapshot.microphoneOpen
-    && !report.preflightCalibrated.snapshot.calibrating
-    && !report.preflightCalibrated.snapshot.active
-    && report.preflightCalibrated.snapshot.sessionPhase === 'idle'
-    && report.preflightCalibrated.snapshot.effectiveElapsedMs === preflightElapsedBefore
-    && report.preflightCalibrated.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
-    && report.preflightCalibrated.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
-    && JSON.stringify(report.preflightCalibrated.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
-    && JSON.stringify(report.preflightCalibrated.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
-    && report.preflightCalibrated.scenePhase === report.preflightStarted.baseline.scenePhase
-    && report.preflightCalibrated.sceneClip === report.preflightStarted.baseline.sceneClip
-    && report.preflightCalibrated.sceneRunning === report.preflightStarted.baseline.sceneRunning
-    && report.preflightCalibrated.timer === report.preflightStarted.baseline.timer,
-  `Idle preflight started session state, timing, reminders, scenes, or source audio: ${JSON.stringify(report.preflightCalibrated)}`);
+  assert(Boolean(report.preflightReady.gum?.constraints?.audio)
+    && report.preflightReady.gum?.constraints?.video === false
+    && report.preflightReady.gum?.constraints?.audio?.deviceId?.exact === 'mic-b'
+    && report.preflightReady.gum.liveBeforeRequest === 0
+    && report.preflightReady.audioTracks === 1
+    && report.preflightReady.videoTracks === 0
+    && report.preflightReady.liveTracks === 1,
+  `Study preflight microphone was not a single audio-only stream: ${JSON.stringify(report.preflightReady)}`);
+  assert(report.preflightReady.snapshot.preflightTesting
+    && report.preflightReady.snapshot.microphoneOpen
+    && !report.preflightReady.snapshot.calibrating
+    && !report.preflightReady.hasVad
+    && report.preflightReady.silenceArmed
+    && report.preflightReady.vadState === 'ready'
+    && !report.preflightReady.snapshot.active
+    && report.preflightReady.snapshot.sessionPhase === 'idle'
+    && report.preflightReady.snapshot.effectiveElapsedMs === preflightElapsedBefore
+    && report.preflightReady.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
+    && report.preflightReady.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
+    && JSON.stringify(report.preflightReady.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
+    && JSON.stringify(report.preflightReady.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
+    && report.preflightReady.scenePhase === report.preflightStarted.baseline.scenePhase
+    && report.preflightReady.sceneClip === report.preflightStarted.baseline.sceneClip
+    && report.preflightReady.sceneRunning === report.preflightStarted.baseline.sceneRunning
+    && report.preflightReady.timer === report.preflightStarted.baseline.timer,
+  `Idle preflight waited for calibration or changed session state: ${JSON.stringify(report.preflightReady)}`);
 
-  report.preflightThreshold = await main.evaluate(`(() => {
+  report.preflightClassification = await main.evaluate(`(() => {
     const duration = document.querySelector('#study-voice-limit-input');
-    const sensitivity = document.querySelector('#voice-threshold-input');
     duration.value = '3';
     duration.dispatchEvent(new Event('input', { bubbles: true }));
-    sensitivity.value = '16';
-    sensitivity.dispatchEvent(new Event('input', { bubbles: true }));
-    state.vad.process = () => ({
-      calibrated: true,
-      calibrationProgress: 1,
-      isSpeech: true,
-      levelDb: -40,
-      levelPercent: 60,
-      noiseFloorDb: -50,
-      thresholdDb: -34,
-      steadyNoise: false,
-      speechScore: 1,
-      voiceRatio: 0.7,
-      flatness: 0.2,
-      flux: 0.08
-    });
-    pollMicrophone();
-    const highSensitivity = {
-      detector: state.quietDetector.snapshot(),
-      evidence: state.latestQuietResult.evidence,
+
+    const mediaDecision = POLICY.classifyStudyAudioEvents([{ name: 'Speech', prob: 0.9 }]);
+    const quietDecision = POLICY.classifyStudyAudioEvents([]);
+    const applyDecision = (decision, durationMs = 1_000) => {
+      const quietResult = state.quietDetector.process(
+        { mediaEvidence: decision.mediaEvidence },
+        durationMs,
+      );
+      renderStudyAudioDecision(quietResult, decision);
+      return {
+        snapshot: window.__beishuTest.getSnapshot(),
+        detector: state.quietDetector.snapshot(),
+        quietResult,
+        status: document.querySelector('#preflight-test-status').textContent.trim(),
+        voiceChip: document.querySelector('#voice-state').textContent.trim(),
+        voiceStatus: document.querySelector('#voice-status').textContent.trim(),
+      };
     };
-    sensitivity.value = '6';
-    sensitivity.dispatchEvent(new Event('input', { bubbles: true }));
-    pollMicrophone();
-    const lowSensitivity = {
-      detector: state.quietDetector.snapshot(),
-      evidence: state.latestQuietResult.evidence,
-    };
-    for (let index = 0; index < 28; index += 1) pollMicrophone();
-    const beforeThreshold = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-    };
-    pollMicrophone();
+
+    const firstEvidence = applyDecision(mediaDecision);
+    const secondEvidence = applyDecision(mediaDecision);
+    const clearedByQuiet = applyDecision(quietDecision);
+    const threeSecondUpdates = Array.from({ length: 4 }, () => applyDecision(mediaDecision));
     const afterThreshold = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-      voiceChip: document.querySelector('#voice-state').textContent.trim(),
-      voiceStatus: document.querySelector('#voice-status').textContent.trim(),
+      ...threeSecondUpdates.at(-1),
       durationOutput: document.querySelector('#study-voice-limit-value').textContent.trim(),
-      sensitivityOutput: document.querySelector('#voice-threshold-value').textContent.trim(),
       sceneRunning: state.sceneRunning,
     };
 
@@ -1005,108 +1037,61 @@ try {
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
     };
-    for (let index = 0; index < 149; index += 1) pollMicrophone();
-    const beforeNewDuration = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-    };
-    pollMicrophone();
-    const afterNewDuration = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-    };
-
-    const marker = document.querySelector('#live-volume-threshold');
-    const detailMarker = document.querySelector('#volume-threshold');
-    const meter = document.querySelector('#live-meter');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 43;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, pointerId, pointerType: 'mouse', button: 0, buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
-    }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true, pointerId, pointerType: 'mouse', buttons: 1,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true, pointerId, pointerType: 'mouse', button: 0,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    const afterMarkerChange = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-      vadSensitivityDb: state.vad.sensitivityDb,
-      latestQuietResult: state.latestQuietResult,
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-      voiceStatus: document.querySelector('#voice-status').textContent.trim(),
-      range: Number(sensitivity.value),
-      liveLeft: marker.style.left,
-      detailLeft: detailMarker.style.left,
-      liveAriaNow: marker.getAttribute('aria-valuenow'),
-      detailAriaNow: detailMarker.getAttribute('aria-valuenow'),
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).studySensitivityDb,
-    };
+    const fifteenSecondUpdates = Array.from({ length: 15 }, () => applyDecision(mediaDecision));
+    const beforeNewDuration = fifteenSecondUpdates.at(-1);
+    const afterNewDuration = applyDecision(mediaDecision);
     return {
-      highSensitivity,
-      lowSensitivity,
-      beforeThreshold,
+      mediaEvidence: mediaDecision.mediaEvidence,
+      quietEvidence: quietDecision.mediaEvidence,
+      firstEvidence,
+      secondEvidence,
+      clearedByQuiet,
+      threeSecondUpdates,
       afterThreshold,
       afterDurationChange,
       beforeNewDuration,
       afterNewDuration,
-      afterMarkerChange,
     };
   })()`);
-  assert(report.preflightThreshold.highSensitivity.detector.violationSeconds === 3
-    && report.preflightThreshold.highSensitivity.detector.sensitivityDb === 16
-    && !report.preflightThreshold.highSensitivity.evidence
-    && report.preflightThreshold.lowSensitivity.detector.sensitivityDb === 6
-    && report.preflightThreshold.lowSensitivity.evidence,
-  `Preflight sliders did not update the live detector: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.beforeThreshold.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterThreshold.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterThreshold.status === '按当前设置将触发提醒。'
-    && report.preflightThreshold.afterThreshold.voiceChip === '已达到提醒条件'
-    && report.preflightThreshold.afterThreshold.voiceStatus === '已达到提醒条件'
-    && report.preflightThreshold.afterThreshold.durationOutput === '3 秒'
-    && report.preflightThreshold.afterThreshold.sensitivityOutput === '底噪 + 6 dB'
-    && report.preflightThreshold.afterThreshold.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
-    && report.preflightThreshold.afterThreshold.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
-    && JSON.stringify(report.preflightThreshold.afterThreshold.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
-    && JSON.stringify(report.preflightThreshold.afterThreshold.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
-    && !report.preflightThreshold.afterThreshold.sceneRunning,
-  `Preflight threshold caused a real reminder or scene change: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.afterDurationChange.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterDurationChange.detector.violationSeconds === 15
-    && report.preflightThreshold.afterDurationChange.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterDurationChange.latestQuietResult === null
-    && report.preflightThreshold.afterDurationChange.status === '设置已更新，请继续测试。'
-    && report.preflightThreshold.afterDurationChange.voiceStatus === '设置已更新，请继续测试'
-    && !report.preflightThreshold.beforeNewDuration.snapshot.preflightThresholdReached
-    && report.preflightThreshold.beforeNewDuration.detector.suspectedSpeechMs === 14_900
-    && report.preflightThreshold.afterNewDuration.snapshot.preflightThresholdReached
-    && !report.preflightThreshold.afterNewDuration.detector.armed
-    && report.preflightThreshold.afterNewDuration.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterNewDuration.status === '按当前设置将触发提醒。',
-  `Changing the preflight duration preserved stale evidence or ignored the new duration: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.afterMarkerChange.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterMarkerChange.snapshot.studySensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.detector.sensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterMarkerChange.vadSensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.latestQuietResult === null
-    && report.preflightThreshold.afterMarkerChange.status === '设置已更新，请继续测试。'
-    && report.preflightThreshold.afterMarkerChange.voiceStatus === '设置已更新，请继续测试'
-    && report.preflightThreshold.afterMarkerChange.range === 14
-    && report.preflightThreshold.afterMarkerChange.liveLeft === '64%'
-    && report.preflightThreshold.afterMarkerChange.detailLeft === '64%'
-    && report.preflightThreshold.afterMarkerChange.liveAriaNow === '14'
-    && report.preflightThreshold.afterMarkerChange.detailAriaNow === '14'
-    && report.preflightThreshold.afterMarkerChange.persisted === 14,
-  `Dragging the live marker did not reset stale preflight evidence or synchronize detectors: ${JSON.stringify(report.preflightThreshold)}`);
+  assert(report.preflightClassification.mediaEvidence
+    && !report.preflightClassification.quietEvidence
+    && report.preflightClassification.firstEvidence.quietResult.suspectedSpeechMs === 0
+    && report.preflightClassification.firstEvidence.voiceChip === '正在复核媒体声音'
+    && report.preflightClassification.secondEvidence.quietResult.suspectedSpeechMs === 1_000
+    && report.preflightClassification.secondEvidence.voiceChip === '疑似媒体声音 1.0 秒'
+    && report.preflightClassification.secondEvidence.status === '已累计疑似媒体声音 1.0 秒。',
+  `Study preflight did not update continuous classifier evidence in real time: ${JSON.stringify(report.preflightClassification)}`);
+  assert(report.preflightClassification.clearedByQuiet.quietResult.suspectedSpeechMs === 0
+    && report.preflightClassification.clearedByQuiet.detector.rawEvidenceMs === 0
+    && report.preflightClassification.clearedByQuiet.voiceChip === '安静'
+    && report.preflightClassification.clearedByQuiet.status === '当前没有达到提醒条件。',
+  `A quiet classifier result did not clear accumulated study evidence: ${JSON.stringify(report.preflightClassification)}`);
+  assert(JSON.stringify(report.preflightClassification.threeSecondUpdates.map((item) => item.quietResult.suspectedSpeechMs))
+      === JSON.stringify([0, 1_000, 2_000, 0])
+    && report.preflightClassification.afterThreshold.snapshot.preflightThresholdReached
+    && report.preflightClassification.afterThreshold.status === '按当前设置将触发提醒。'
+    && report.preflightClassification.afterThreshold.voiceChip === '已达到提醒条件'
+    && report.preflightClassification.afterThreshold.voiceStatus === '已达到提醒条件'
+    && report.preflightClassification.afterThreshold.durationOutput === '3 秒'
+    && report.preflightClassification.afterThreshold.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
+    && report.preflightClassification.afterThreshold.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
+    && JSON.stringify(report.preflightClassification.afterThreshold.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
+    && JSON.stringify(report.preflightClassification.afterThreshold.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
+    && !report.preflightClassification.afterThreshold.sceneRunning,
+  `Study preflight threshold caused a real reminder or failed to track consecutive evidence: ${JSON.stringify(report.preflightClassification)}`);
+  assert(!report.preflightClassification.afterDurationChange.snapshot.preflightThresholdReached
+    && report.preflightClassification.afterDurationChange.detector.violationSeconds === 15
+    && report.preflightClassification.afterDurationChange.detector.suspectedSpeechMs === 0
+    && report.preflightClassification.afterDurationChange.latestQuietResult === null
+    && report.preflightClassification.afterDurationChange.status === '设置已更新，请继续测试。'
+    && report.preflightClassification.afterDurationChange.voiceStatus === '设置已更新，请继续测试'
+    && !report.preflightClassification.beforeNewDuration.snapshot.preflightThresholdReached
+    && report.preflightClassification.beforeNewDuration.detector.suspectedSpeechMs === 14_000
+    && report.preflightClassification.afterNewDuration.snapshot.preflightThresholdReached
+    && !report.preflightClassification.afterNewDuration.detector.armed
+    && report.preflightClassification.afterNewDuration.detector.suspectedSpeechMs === 0
+    && report.preflightClassification.afterNewDuration.status === '按当前设置将触发提醒。',
+  `Changing the preflight duration preserved stale evidence or ignored the new duration: ${JSON.stringify(report.preflightClassification)}`);
 
   report.preflightStopped = await main.evaluate(`(async () => {
     const stream = window.__gumStreams[0];
@@ -1243,7 +1228,7 @@ try {
   assert(report.studyWithoutVoiceprint.mode === 'study'
     && !report.studyWithoutVoiceprint.profile
     && report.studyWithoutVoiceprint.startEnabled, 'Study mode was blocked by a missing voiceprint');
-  await completePreflightCalibration(main);
+  await waitForDirectStudyDetection(main, { preflight: true });
   report.startWinsRace = await main.evaluate(`(async () => {
     const [startResult, previewResult, enrollmentResult] = await Promise.all([
       startSession(),
@@ -1266,9 +1251,12 @@ try {
     && !report.startWinsRace.enrollmentPending
     && !report.startWinsRace.enrollmentOpen,
   `Start did not exclude simultaneous preview/enrollment: ${JSON.stringify(report.startWinsRace)}`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   report.studyStarted = await main.evaluate(`({
     snapshot: window.__beishuTest.getSnapshot(),
+    hasVad: Boolean(state.vad),
+    silenceArmed: state.silenceArmed,
+    vadState: document.body.dataset.vadState,
     gum: window.__gumRequests.at(-1),
     audioTracks: state.audioStream?.getAudioTracks().length || 0,
     videoTracks: state.audioStream?.getVideoTracks().length || 0,
@@ -1281,6 +1269,11 @@ try {
   })`);
   assert(report.studyStarted.snapshot.active && report.studyStarted.snapshot.mode === 'study'
     && report.studyStarted.snapshot.sessionPhase === 'studying'
+    && report.studyStarted.snapshot.studyUsesDirectClassification
+    && !report.studyStarted.snapshot.calibrating
+    && !report.studyStarted.hasVad
+    && report.studyStarted.silenceArmed
+    && report.studyStarted.vadState === 'ready'
     && !report.studyStarted.snapshot.preflightTesting
     && !report.studyStarted.snapshot.preflightStarting
     && !report.studyStarted.snapshot.preflightStopping,
@@ -1296,23 +1289,23 @@ try {
   assertLayout(report.studyStarted.layout, 'Active study layout');
 
   report.meters = await main.evaluate(`(() => {
-    state.vad.process = () => ${forcedVadResult};
+    Object.defineProperty(state.analyser, 'getFloatTimeDomainData', {
+      configurable: true,
+      value: (samples) => samples.fill(10 ** (-63 / 20)),
+    });
     pollMicrophone();
     const detailMeter = document.querySelector('.meter-wrap .meter');
     const liveMeter = document.querySelector('#live-meter');
-    const snapshot = window.__beishuTest.getSnapshot();
-    const expectedThreshold = String(Math.min(100, Math.max(0,
-      snapshot.latestNoiseFloorDb + snapshot.studySensitivityDb + 100))) + '%';
+    const detailThreshold = document.querySelector('#volume-threshold');
+    const liveThreshold = document.querySelector('#live-volume-threshold');
     return {
       detailAria: detailMeter.getAttribute('aria-valuenow'),
       liveAria: liveMeter.getAttribute('aria-valuenow'),
       detailBar: document.querySelector('#volume-bar').style.width,
       liveBar: document.querySelector('#live-volume-bar').style.width,
-      detailThreshold: document.querySelector('#volume-threshold').style.left,
-      liveThreshold: document.querySelector('#live-volume-threshold').style.left,
-      expectedThreshold,
-      sensitivityDb: snapshot.studySensitivityDb,
-      noiseFloorDb: snapshot.latestNoiseFloorDb,
+      detailThresholdHidden: detailThreshold.hidden && getComputedStyle(detailThreshold).display === 'none',
+      liveThresholdHidden: liveThreshold.hidden && getComputedStyle(liveThreshold).display === 'none',
+      hasVad: Boolean(state.vad),
       stripVisible: ${layoutExpression}.stripVisible,
     };
   })()`);
@@ -1320,12 +1313,30 @@ try {
     report.failures.push(`Meter aria values are not synchronized: ${JSON.stringify(report.meters)}`);
   }
   assert(report.meters.detailBar === '37%' && report.meters.liveBar === '37%'
-    && report.meters.detailThreshold === report.meters.expectedThreshold
-    && report.meters.liveThreshold === report.meters.expectedThreshold
-    && report.meters.sensitivityDb === 14
-    && report.meters.noiseFloorDb === -50,
-  `Meter visuals are not synchronized: ${JSON.stringify(report.meters)}`);
+    && report.meters.detailThresholdHidden
+    && report.meters.liveThresholdHidden
+    && !report.meters.hasVad,
+  `Study raw-volume meters or hidden threshold markers are inconsistent: ${JSON.stringify(report.meters)}`);
   assert(report.meters.stripVisible, 'Live voice strip disappeared during active detection');
+
+  report.studyRestStarted = await main.evaluate(`(() => {
+    state.milestoneLedger = new POLICY.MilestoneLedger('study', { availableBreakVouchers: 1 });
+    updateBreakButton();
+    return window.__beishuTest.startBreak(5_000);
+  })()`);
+  assert(report.studyRestStarted, 'Study rest did not start with an available voucher');
+  await waitForEvaluation(
+    main,
+    `window.__beishuTest.getSnapshot()`,
+    (value) => value.mode === 'study' && value.sessionPhase === 'resting' && !value.microphoneOpen,
+  );
+  await main.evaluate(`window.__beishuTest.completeBreak()`);
+  report.studyRestResumed = await waitForDirectStudyDetection(main);
+  assert(report.studyRestResumed.snapshot.sessionPhase === 'studying'
+    && !report.studyRestResumed.snapshot.calibrating
+    && !report.studyRestResumed.hasVad
+    && report.studyRestResumed.silenceArmed,
+  `Study rest recovery waited for calibration or created a VAD: ${JSON.stringify(report.studyRestResumed)}`);
 
   await main.evaluate(`stopSession(false, true)`);
   await waitForEvaluation(main, `window.__beishuTest.getSnapshot()`, (value) => !value.active && value.sessionPhase === 'idle');
@@ -1832,7 +1843,7 @@ try {
     document.querySelector('#start-button').click();
     return true;
   })()`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   await main.evaluate(`(() => {
     window.__sessionFailurePromise = window.__beishuTest.runScheduledPlan({
       kind: 'patrol',
@@ -1874,7 +1885,7 @@ try {
     document.querySelector('#start-button').click();
     return true;
   })()`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   await main.evaluate(`(() => {
     window.__stoppingFailurePromise = window.__beishuTest.runScheduledPlan({
       kind: 'patrol',

@@ -22,7 +22,7 @@
 ```powershell
 $node = '<工作区依赖定位结果中的 Node.js executable>'
 cd D:\RedWatchRecite
-$candidate = 'work\release-candidate-1.11.0'
+$candidate = 'work\release-candidate-1.11.1'
 if (Test-Path -LiteralPath $candidate) { throw "候选目录已存在，请换一个全新目录：$candidate" }
 & $node '.\node_modules\electron-builder\cli.js' --win nsis --config.directories.output=$candidate
 & $node '.\node_modules\electron-builder\cli.js' --win portable --config.directories.output=$candidate --config.win.artifactName='背书自习监督-便携版-${version}.${ext}'
@@ -43,7 +43,10 @@ electron-builder 还会在隔离候选目录生成 `win-unpacked\背书自习监
 - 按 `docs/TESTING.md` 以 `SUPERVISION_DATA_DIR` 指向临时隔离目录。
 - 先完成不启动 Electron、窗口、托盘、真实麦克风或真实声纹的后台纯 Node 门禁。本轮用户正在桌面工作时禁止运行 UI/CDP；UI 候选验证只能在用户明确允许后或独立 Windows 会话/虚拟机中进行。
 - `audio-event-model-smoke.cjs` 必须以 `BEISHU_REQUIRE_AUDIO_EVENT_FIXTURES=1` 运行发布门禁，读取临时官方媒体 fixture 和至少 3 份来源明确的真实键盘 fixture；fixture 不提交、不打包，验证结束后从临时目录清理。
-- 验证自习最近约 2 秒滚动窗口、约 1 秒更新、首次有效分类约需 2 秒；键盘单独不累计，键盘与媒体双证据仍累计。静音/耳机、极端掩蔽和合法课程误判边界必须保留在用户说明中。
+- 验证自习完全不创建或使用 `AdaptiveVad`，没有 3 秒底噪校准、音量/sensitivity 门槛或重校准路径；白色门槛线、抗噪滑块和重校准按钮均隐藏，音量条只显示原始 RMS 且不得参与分类。
+- 验证自习直接进入最近约 2 秒滚动窗口、约 1 秒更新、首次有效分类约需 2 秒；键盘单独不累计，键盘与媒体双证据仍累计。静音/耳机、极端掩蔽和合法课程误判边界必须保留在用户说明中。
+- 验证自习应用链路不传入 gap 容忍参数：任一阴性分类窗口立即清空候选，连续阳性仍抵扣约 1 秒滚动窗口重叠。
+- 验证休息后的有声开场结束时，背书仍重新校准约 3 秒，自习直接恢复分类并重新形成约 2 秒首窗。
 - 验证两个窗口都使用禁用缓存的内存会话；正常退出后隔离数据根中不得残留 `TransientElectronData`、`SessionData`、`Code Cache`、`GPUCache`。
 - 验证安装版的名称、窗口标题、托盘名称、桌面和开始菜单快捷方式都是“背书自习监督”。
 - 验证首次安装不会读取旧便携版声纹；首次背书前需由用户主动重新录入。
@@ -60,6 +63,11 @@ Copy-Item -LiteralPath 'D:\RedWatchRecite\docs\USER_GUIDE.md' -Destination 'D:\R
 ```
 
 将实际字节数和 SHA-256 写入 `docs/USER_GUIDE.md`，随后再次复制说明到 `release-staging\使用说明.md`，并确认两份文件哈希一致。
+
+1.11.1 实际校验值：
+
+- 安装版：286,465,178 字节；SHA-256 `4F7CE4674E48E5772D5CDC5DFC10FB3DDC1C7F09DE53EECE2226A157FDDC4E2B`；文件版本 `1.11.1`；`NotSigned`。
+- 便携版：275,770,933 字节；SHA-256 `F9F66EB0891A48D0A7EC5C1D0CDE4FA71B78ECD1CD02C16828B19EC5DF2E7817`；文件版本 `1.11.1`；`NotSigned`。
 
 ## 5. 交付与卸载
 

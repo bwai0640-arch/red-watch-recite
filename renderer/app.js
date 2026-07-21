@@ -80,7 +80,6 @@ const SPEAKER_CONFIRM_HOLD_MS = 2_500;
 const SPEAKER_DEADLINE_GRACE_MS = 3_000;
 const STUDY_EVENT_WINDOW_SECONDS = 2;
 const STUDY_EVENT_INTERVAL_MS = 1_000;
-const STUDY_EVENT_GAP_SECONDS = 1;
 const STUDY_EVENT_OVERLAP_SECONDS = Math.max(
   0,
   STUDY_EVENT_WINDOW_SECONDS - (STUDY_EVENT_INTERVAL_MS / 1_000),
@@ -181,7 +180,6 @@ const state = {
     reciteSilenceSeconds: POLICY.MODE_RULES.recite.violationSeconds.default,
     studyVoiceSeconds: POLICY.MODE_RULES.study.violationSeconds.default,
     reciteSensitivityDb: 8,
-    studySensitivityDb: POLICY.QUIET_SENSITIVITY_DB.default,
     microphoneDeviceId: '',
   },
   microphoneDevices: [],
@@ -226,9 +224,6 @@ function loadSettings() {
       Math.round(Number(stored.reciteSensitivityDb) || 8),
       4,
       18,
-    );
-    state.settings.studySensitivityDb = POLICY.normalizeQuietSensitivityDb(
-      stored.studySensitivityDb,
     );
     state.settings.microphoneDeviceId = typeof stored.microphoneDeviceId === 'string'
       ? stored.microphoneDeviceId.slice(0, 512)
@@ -374,7 +369,7 @@ function renderThresholdMarkers() {
   const { minimum, maximum } = thresholdRange();
   const value = normalizeThreshold(voiceThreshold());
   const position = thresholdMarkerPercent();
-  const settingName = state.mode === 'study' ? '出声门槛' : '抗噪幅度';
+  const settingName = '抗噪幅度';
   const valueText = `底噪 + ${value} dB`;
   [UI.thresholdMarker, UI.liveThresholdMarker].forEach((marker, index) => {
     marker.style.left = `${position}%`;
@@ -414,20 +409,14 @@ function resetDetectionAfterSettingChange() {
 }
 
 function updateThreshold({ persist = true } = {}) {
-  const previousThreshold = state.mode === 'recite'
-    ? state.settings.reciteSensitivityDb
-    : state.settings.studySensitivityDb;
+  const previousThreshold = state.settings.reciteSensitivityDb;
   const threshold = normalizeThreshold(voiceThreshold());
   UI.voiceThreshold.value = String(threshold);
-  if (state.mode === 'recite') state.settings.reciteSensitivityDb = threshold;
-  else state.settings.studySensitivityDb = POLICY.normalizeQuietSensitivityDb(threshold);
-  const currentThreshold = state.mode === 'recite'
-    ? state.settings.reciteSensitivityDb
-    : state.settings.studySensitivityDb;
+  state.settings.reciteSensitivityDb = threshold;
+  const currentThreshold = state.settings.reciteSensitivityDb;
   UI.voiceThreshold.value = String(currentThreshold);
   UI.voiceThresholdValue.textContent = `底噪 + ${currentThreshold} dB`;
-  state.vad?.setSensitivity(currentThreshold);
-  state.quietDetector?.setSensitivityDb(currentThreshold);
+  if (state.mode === 'recite') state.vad?.setSensitivity(currentThreshold);
   renderThresholdMarkers();
   if (currentThreshold !== previousThreshold) resetDetectionAfterSettingChange();
   if (persist) saveSettings();
@@ -635,16 +624,14 @@ function updateModeUi() {
   UI.stopButton.textContent = studyingQuietly ? '结束本次自习' : '结束本次背书';
   UI.voicePanelTitle.textContent = studyingQuietly ? '安静自习检测' : '本人声纹巡查';
   UI.liveVoiceTitle.textContent = studyingQuietly ? '安静检测' : '本人出声检测';
-  UI.voiceThresholdLabel.textContent = studyingQuietly ? '出声门槛' : '抗噪幅度';
+  UI.voiceThresholdLabel.textContent = '抗噪幅度';
   UI.silenceLimit.value = String(state.settings.reciteSilenceSeconds);
   UI.silenceLimitValue.textContent = `${state.settings.reciteSilenceSeconds} 秒`;
   UI.studyVoiceLimit.value = String(state.settings.studyVoiceSeconds);
   UI.studyVoiceLimitValue.textContent = `${state.settings.studyVoiceSeconds} 秒`;
-  UI.voiceThreshold.min = studyingQuietly ? '6' : '4';
-  UI.voiceThreshold.max = studyingQuietly ? '16' : '18';
-  UI.voiceThreshold.value = String(
-    studyingQuietly ? state.settings.studySensitivityDb : state.settings.reciteSensitivityDb,
-  );
+  UI.voiceThreshold.min = '4';
+  UI.voiceThreshold.max = '18';
+  UI.voiceThreshold.value = String(state.settings.reciteSensitivityDb);
   document.querySelectorAll('.study-only').forEach((element) => { element.hidden = !studyingQuietly; });
   document.querySelectorAll('.recite-only').forEach((element) => { element.hidden = studyingQuietly; });
   updateThreshold({ persist: false });
@@ -1276,8 +1263,8 @@ async function runIntro() {
     return;
   }
   if (!state.active) return;
-  UI.sessionState.textContent = '校准声音中';
-  beginNoiseCalibration();
+  UI.sessionState.textContent = state.mode === 'study' ? '声音检测准备中' : '校准声音中';
+  beginDetectionWarmup();
 }
 
 async function runResumeIntro() {
@@ -1304,8 +1291,8 @@ async function runResumeIntro() {
     const opened = await openMicrophone();
     if (!opened) return;
     if (!state.active || generation !== state.restGeneration) return;
-    UI.sessionState.textContent = '校准声音中';
-    beginNoiseCalibration();
+    UI.sessionState.textContent = state.mode === 'study' ? '声音检测准备中' : '校准声音中';
+    beginDetectionWarmup();
   } catch (error) {
     UI.voiceStatus.textContent = `休息后无法恢复麦克风：${error.message}`;
     addLog(`麦克风恢复失败：${error.message}`);
@@ -1567,14 +1554,18 @@ async function startPreflightTest() {
   state.preflightStarting = true;
   state.preflightThresholdReached = false;
   state.preflightSpeakerError = '';
-  updatePreflightUi('启动麦克风后将先校准 3 秒环境底噪。');
+  updatePreflightUi(state.mode === 'study'
+    ? '启动麦克风后直接检测声音。'
+    : '启动麦克风后将先校准 3 秒环境底噪。');
   try {
     const opened = await openMicrophone();
     if (!opened || generation !== state.preflightGeneration || !state.preflightStarting) return false;
     state.preflightStarting = false;
     state.preflightTesting = true;
-    beginNoiseCalibration();
-    updatePreflightUi('正在校准环境底噪，请保持平时的学习环境。');
+    beginDetectionWarmup();
+    updatePreflightUi(state.mode === 'study'
+      ? '声音检测已开始，正在形成首个分类窗口。'
+      : '正在校准环境底噪，请保持平时的学习环境。');
     return true;
   } catch (error) {
     if (generation !== state.preflightGeneration) return false;
@@ -2060,6 +2051,14 @@ function calculateAudioFeatures() {
   };
 }
 
+function calculateAudioLevelPercent() {
+  state.analyser.getFloatTimeDomainData(state.samples);
+  const sum = state.samples.reduce((total, sample) => total + sample * sample, 0);
+  const rms = Math.sqrt(sum / Math.max(1, state.samples.length));
+  const db = Math.max(METER_MIN_DB, 20 * Math.log10(Math.max(rms, 0.00001)));
+  return clamp(Math.round(db - METER_MIN_DB), 0, 100);
+}
+
 function resetSpeakerRuntime() {
   state.speakerVerificationGeneration += 1;
   state.latestVadSpeech = false;
@@ -2087,13 +2086,6 @@ function resetStudyAudioRuntime() {
   state.studyAudioClassificationPending = false;
   state.lastStudyAudioClassificationAt = 0;
   state.latestStudyAudioDecision = null;
-}
-
-function audioLevelDb(samples) {
-  let sumSquared = 0;
-  for (const sample of samples) sumSquared += sample * sample;
-  const rms = Math.sqrt(sumSquared / Math.max(1, samples.length));
-  return Math.max(METER_MIN_DB, 20 * Math.log10(Math.max(rms, 0.00001)));
 }
 
 function renderStudyAudioDecision(quietResult, decision) {
@@ -2151,16 +2143,12 @@ async function classifyStudyAudioWindow(samples, sampleRate, decisionDurationMs,
     const normalized = sampleRate === SpeakerAudio.TARGET_SAMPLE_RATE
       ? samples
       : SpeakerAudio.resampleLinear(samples, sampleRate, SpeakerAudio.TARGET_SAMPLE_RATE);
-    const levelDb = audioLevelDb(normalized);
     const result = await window.desktopAPI.classifyAudioEvents({
       samples: normalized,
       sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
     });
     if (generation !== state.studyAudioClassificationGeneration || !isStudyDetectionActive()) return;
-    const decision = POLICY.classifyStudyAudioEvents(result?.events, {
-      levelDeltaDb: levelDb - state.latestNoiseFloorDb,
-      sensitivityDb: state.settings.studySensitivityDb,
-    });
+    const decision = POLICY.classifyStudyAudioEvents(result?.events);
     const quietResult = state.quietDetector.process(
       { mediaEvidence: decision.mediaEvidence },
       decisionDurationMs,
@@ -2340,40 +2328,54 @@ function onRuntimePcmChunk(chunk) {
   verifyOwnerVoice(windowSamples, sampleRate);
 }
 
-function beginNoiseCalibration() {
-  state.vad = new AdaptiveVad.AdaptiveVoiceDetector({
-    calibrationFrames: Math.round((CALIBRATION_SECONDS * 1000) / MICROPHONE_POLL_MS),
-    sensitivityDb: voiceThreshold(),
-    freezeNoiseFloor: state.mode === 'study',
-  });
-  state.calibrating = true;
-  state.quietDetector = state.mode === 'study'
+function beginDetectionWarmup() {
+  const directStudyDetection = state.mode === 'study';
+  state.vad = directStudyDetection
+    ? null
+    : new AdaptiveVad.AdaptiveVoiceDetector({
+      calibrationFrames: Math.round((CALIBRATION_SECONDS * 1000) / MICROPHONE_POLL_MS),
+      sensitivityDb: state.settings.reciteSensitivityDb,
+    });
+  state.calibrating = !directStudyDetection;
+  state.quietDetector = directStudyDetection
     ? new POLICY.QuietModeDetector({
       violationSeconds: state.settings.studyVoiceSeconds,
-      sensitivityDb: state.settings.studySensitivityDb,
-      evidenceGapSeconds: STUDY_EVENT_GAP_SECONDS,
       evidenceOverlapSeconds: STUDY_EVENT_OVERLAP_SECONDS,
       frameMs: STUDY_EVENT_INTERVAL_MS,
     })
     : null;
   state.latestQuietResult = null;
-  state.silenceArmed = false;
+  state.silenceArmed = directStudyDetection;
   state.silentSince = 0;
   state.previousSpectrum = null;
   resetSpeakerRuntime();
   resetStudyAudioRuntime();
+  UI.recalibrateButton.disabled = true;
+  if (directStudyDetection) {
+    document.body.dataset.vadState = 'ready';
+    setChip(UI.voiceState, '正在识别声音');
+    UI.voiceStatus.textContent = '等待首个声音分类结果';
+    if (isPreflightAudioActive()) {
+      updatePreflightUi('声音检测已开始，正在形成首个分类窗口。');
+    } else {
+      enterStudyingPhase();
+    }
+    return;
+  }
   document.body.dataset.vadState = 'calibrating';
   setChip(UI.voiceState, `校准声音 ${CALIBRATION_SECONDS} 秒`);
   UI.voiceStatus.textContent = '正在校准环境声音';
-  UI.recalibrateButton.disabled = true;
 }
 
 function pollMicrophone() {
   const preflight = isPreflightAudioActive();
-  if ((!state.active && !preflight) || !state.analyser || !state.vad || state.alertOpen || state.silencePausedAt) return;
+  if ((!state.active && !preflight) || !state.analyser || state.alertOpen || state.silencePausedAt) return;
+  if (state.mode === 'recite' && !state.vad) return;
   let result;
   try {
-    result = state.vad.process(calculateAudioFeatures());
+    result = state.mode === 'study'
+      ? { levelPercent: calculateAudioLevelPercent() }
+      : state.vad.process(calculateAudioFeatures());
   } catch (error) {
     if (preflight) {
       stopPreflightTest({ status: `测试已停止：${error.message}` }).catch(handleAuxiliaryUiError);
@@ -2385,10 +2387,10 @@ function pollMicrophone() {
   UI.liveVolumeBar.style.width = `${result.levelPercent}%`;
   UI.meter.setAttribute('aria-valuenow', String(result.levelPercent));
   UI.liveMeter.setAttribute('aria-valuenow', String(result.levelPercent));
-  if (Number.isFinite(result.noiseFloorDb)) {
+  if (state.mode === 'recite' && Number.isFinite(result.noiseFloorDb)) {
     state.latestNoiseFloorDb = clamp(result.noiseFloorDb, METER_MIN_DB, METER_MAX_DB);
   }
-  renderThresholdMarkers();
+  if (state.mode === 'recite') renderThresholdMarkers();
 
   if (state.calibrating) {
     const remaining = Math.max(0, CALIBRATION_SECONDS * (1 - result.calibrationProgress));
@@ -2807,12 +2809,12 @@ UI.enrollmentMicButton.addEventListener('click', () => runEnrollmentMicrophone()
 UI.enrollmentCancelButton.addEventListener('click', () => closeSpeakerEnrollment({ cancel: true }));
 UI.previewClipButton.addEventListener('click', previewSelectedClip);
 UI.recalibrateButton.addEventListener('click', () => {
-  if (!state.active || state.sessionPhase !== 'studying') return;
+  if (state.mode !== 'recite' || !state.active || state.sessionPhase !== 'studying') return;
   state.sessionPhase = 'resuming';
   state.studyClock.pause();
   clearPatrolTimer();
   UI.sessionState.textContent = '校准声音中';
-  beginNoiseCalibration();
+  beginDetectionWarmup();
   addLog('重新校准声音。');
 });
 UI.inlineAlertDismiss.addEventListener('click', () => finishPreview());
@@ -2889,7 +2891,7 @@ window.__beishuTest = Object.freeze({
       reciteSilenceSeconds: state.settings.reciteSilenceSeconds,
       studyVoiceSeconds: state.settings.studyVoiceSeconds,
       reciteSensitivityDb: state.settings.reciteSensitivityDb,
-      studySensitivityDb: state.settings.studySensitivityDb,
+      studyUsesDirectClassification: true,
       latestNoiseFloorDb: state.latestNoiseFloorDb,
       quietDetector: state.quietDetector?.snapshot() || null,
       audioEventReady: state.audioEventReady,

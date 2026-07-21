@@ -14,11 +14,7 @@ function event(name, prob) {
 }
 
 function classify(events, overrides = {}) {
-  return classifyStudyAudioEvents(events, {
-    levelDeltaDb: 18,
-    sensitivityDb: 10,
-    ...overrides,
-  });
+  return classifyStudyAudioEvents(events, overrides);
 }
 
 function feed(detector, decisions, frameMs = SECOND_MS) {
@@ -109,16 +105,19 @@ const borderlineKeyboardOnly = classify([
 assert.equal(borderlineKeyboardOnly.mediaEvidence, false);
 assert.equal(borderlineKeyboardOnly.keyboardOnly, true);
 
-// Probability and level boundaries are inclusive and remain independently
-// adjustable. A strong label below the ambient-level gate must not trigger.
+// Probability boundaries are inclusive. Legacy ambient-level options must not
+// suppress a qualifying label because self-study now classifies sound directly.
 assert.equal(classify([event('Speech', 0.199)]).mediaEvidence, false);
 assert.equal(classify([event('Speech', 0.20)]).mediaEvidence, true);
 assert.equal(classify([event('Television', 0.119)]).mediaEvidence, false);
 assert.equal(classify([event('Television', 0.12)]).mediaEvidence, true);
 assert.equal(classify([event('Typing', 0.179)]).keyboardEvidence, false);
 assert.equal(classify([event('Typing', 0.18)]).keyboardEvidence, true);
-assert.equal(classify([event('Speech', 0.99)], { levelDeltaDb: 9.99 }).mediaEvidence, false);
-assert.equal(classify([event('Speech', 0.99)], { levelDeltaDb: 10 }).mediaEvidence, true);
+assert.equal(classify([event('Speech', 0.99)], {
+  levelDeltaDb: -100,
+  sensitivityDb: 100,
+}).mediaEvidence, true);
+assert.equal('aboveLevelThreshold' in classify([event('Speech', 0.99)]), false);
 
 const customThresholds = classify([
   event('Speech', 0.39),
@@ -331,18 +330,27 @@ assert.match(rendererSource, /const reciteActive = isReciteDetectionActive\(\);/
 assert.match(rendererSource, /state\.quietDetector\?\.reset\(\);\s+resetStudyAudioRuntime\(\);/);
 assert.match(rendererSource, /studyAudioClassificationGeneration \+= 1;/);
 assert.match(rendererSource, /evidenceOverlapSeconds: STUDY_EVENT_OVERLAP_SECONDS/);
+assert.match(rendererSource, /const directStudyDetection = state\.mode === 'study';/);
+assert.match(rendererSource, /state\.vad = directStudyDetection\s+\? null/);
+assert.match(rendererSource, /\? \{ levelPercent: calculateAudioLevelPercent\(\) \}/);
+assert.match(rendererSource, /POLICY\.classifyStudyAudioEvents\(result\?\.events\)/);
+assert.doesNotMatch(rendererSource, /studySensitivityDb/);
+assert.doesNotMatch(rendererSource, /levelDeltaDb: levelDb - state\.latestNoiseFloorDb/);
+assert.doesNotMatch(rendererSource, /evidenceGapSeconds:/);
 assert.doesNotMatch(rendererSource, /resetPreflightDetectionAfterSettingChange/);
 
 console.log(JSON.stringify({
   keyboardLabelsCovered: 5,
   mediaLabelsCovered: 10,
   loudKeyboardDoesNotMaskMedia: true,
-  levelAndProbabilityBoundariesCovered: true,
+  directClassificationAndProbabilityBoundariesCovered: true,
   adjustableViolationSecondsCovered: [3, 15],
-  oneClassifierGapTolerated: true,
-  twoClassifierGapsReset: true,
+  genericGapTolerancePolicyCovered: true,
+  genericGapExpiryPolicyCovered: true,
   overlappingWindowsDeduplicated: true,
   liveSettingChangeInvalidatesRollingAudio: true,
+  studyNoiseFloorGateRemoved: true,
+  studyRequiresConsecutiveClassifierEvidence: true,
   uiStarted: false,
   microphoneAccessed: false,
   profileAccessed: false,

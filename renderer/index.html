@@ -96,7 +96,7 @@
           </div>
           <div id="live-meter" class="meter compact-meter" role="meter" aria-label="实时麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="live-volume-bar" class="volume-bar"></div>
-            <i id="live-volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="粗调检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键粗调检测门槛"></i>
+            <i id="live-volume-threshold" class="threshold-marker recite-only" role="slider" tabindex="0" aria-label="粗调检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键粗调检测门槛"></i>
           </div>
         </div>
       </section>
@@ -110,10 +110,13 @@
             <span id="voice-state" class="chip">未开启</span>
           </div>
           <div class="meter-wrap">
-            <div class="meter-labels"><span>环境底噪</span><span>本人声音</span></div>
+            <div class="meter-labels">
+              <span class="recite-only">环境底噪</span><span class="recite-only">本人声音</span>
+              <span class="study-only" hidden>较轻</span><span class="study-only" hidden>较响</span>
+            </div>
             <div class="meter" role="meter" aria-label="麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               <div id="volume-bar" class="volume-bar"></div>
-              <i id="volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="调整检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键调整检测门槛"></i>
+              <i id="volume-threshold" class="threshold-marker recite-only" role="slider" tabindex="0" aria-label="调整检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键调整检测门槛"></i>
             </div>
           </div>
           <p id="voice-status" class="status-copy">未在检测声音</p>
@@ -126,7 +129,7 @@
               持续出声提醒 <output id="study-voice-limit-value">8 秒</output>
               <input id="study-voice-limit-input" type="range" min="3" max="15" step="1" value="8" />
             </label>
-            <label>
+            <label class="recite-only">
               <span id="voice-threshold-label">抗噪幅度</span> <output id="voice-threshold-value">底噪 + 8 dB</output>
               <input id="voice-threshold-input" type="range" min="4" max="18" step="1" value="8" />
             </label>
@@ -152,7 +155,7 @@
                 <button id="speaker-delete-button" class="button secondary" hidden>删除声纹</button>
               </div>
             </div>
-            <button id="recalibrate-button" class="button secondary" disabled>重新校准环境底噪</button>
+            <button id="recalibrate-button" class="button secondary recite-only" disabled>重新校准环境底噪</button>
           </div>
         </article>
       </section>
