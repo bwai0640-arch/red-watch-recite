@@ -6,6 +6,7 @@
 - UI/CDP 测试必须使用隔离的数据目录和独立调试端口。
 - `speaker-ui-test.mjs` 与 `adversarial-ui-test.mjs` 会调用 `deleteSpeakerProfile()` 并退出被测应用，绝不能连接真实用户正在使用的安装版。
 - 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。
+- 1.11.0 本轮验证按用户要求仅运行后台纯 Node 测试：不启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。下文 UI 矩阵保留为后续独立会话/虚拟机或用户明确许可后的发布门禁，不代表本轮已经运行。
 
 ## Node 路径
 
@@ -33,10 +34,14 @@ cd D:\RedWatchRecite
 & $node --check main.js
 & $node --check preload.js
 & $node --check break-prompt-preload.js
+& $node --check audio-event-service.js
+& $node --check audio-event-worker.js
 & $node scripts\profile-crypto-test.cjs
 & $node scripts\scene-rules-test.cjs
 & $node scripts\study-policy-test.cjs
 & $node scripts\vad-adversarial-test.cjs
+& $node scripts\audio-event-policy-test.cjs
+& $node scripts\audio-event-model-smoke.cjs
 & $node scripts\speaker-audio-test.cjs
 & $node scripts\speaker-model-test.cjs
 & $node scripts\speaker-service-test.cjs
@@ -47,8 +52,10 @@ cd D:\RedWatchRecite
 | 脚本 | 重点 |
 |---|---|
 | `scene-rules-test.cjs` | 开场/结束、随机池、30～120 秒、25% 独立事件、三级违规、仅预览资源 |
-| `study-policy-test.cjs` | 双模式阈值、有效学习时钟、休息券/表扬里程碑、自习连续人声策略 |
+| `study-policy-test.cjs` | 双模式阈值、有效学习时钟、休息券/表扬里程碑和自习累计状态机 |
 | `vad-adversarial-test.cjs` | 稳态风扇、真人响应、键盘瞬态、VAD 尾音与连续原始人声边界 |
+| `audio-event-policy-test.cjs` | CED 标签归类、概率/音量边界、键盘单独放行、键盘与两项媒体双证据、3～15 秒阈值、1 秒间隙容忍、重叠抵扣和学习中设置变更作废旧 generation |
+| `audio-event-model-smoke.cjs` | 纯 Node 加载实际 CED Mini；静音与合成键盘负样本；可选临时官方媒体和真实键盘混音正样本 |
 | `speaker-audio-test.cjs` | 重采样、24 秒、8 个 2.4 秒窗口、动态范围 |
 | `speaker-model-test.cjs` | 打印 3 个身份 fixture 的相似度矩阵；该脚本没有完整阈值断言 |
 | `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed |
@@ -56,7 +63,25 @@ cd D:\RedWatchRecite
 
 `speaker-service-test.cjs` 只使用并清理 `work/speaker-service-test-data`。若修改该路径，必须重新确认不会指向用户数据。
 
+### CED Mini 发布候选正样本门禁
+
+不带 fixture 运行 `audio-event-model-smoke.cjs` 只能证明模型可加载、静音不误报、合成键盘不误报，不能证明真实媒体在响键盘下仍能识别。发布 1.11.0 候选前必须额外运行一次强制正样本门禁：
+
+```powershell
+$env:BEISHU_AUDIO_EVENT_FIXTURES = '<临时解压的 sherpa-onnx 官方 audio-tagging test_wavs 目录>'
+$env:BEISHU_KEYBOARD_FIXTURES = '<至少 3 份来源明确、仅用于本地测试的真实键盘 WAV 目录>'
+$env:BEISHU_SPEECH_FIXTURE = '<临时下载的 sherpa-onnx Obama.wav>'
+$env:BEISHU_SPEECH_OFFSET_SECONDS = '30'
+$env:BEISHU_REQUIRE_AUDIO_EVENT_FIXTURES = '1'
+& $node scripts\audio-event-model-smoke.cjs
+Remove-Item Env:BEISHU_AUDIO_EVENT_FIXTURES, Env:BEISHU_KEYBOARD_FIXTURES, Env:BEISHU_SPEECH_FIXTURE, Env:BEISHU_SPEECH_OFFSET_SECONDS, Env:BEISHU_REQUIRE_AUDIO_EVENT_FIXTURES
+```
+
+音乐正样本来自 sherpa-onnx CED Mini 转换包的 `test_wavs/3.wav`，人声正样本来自 sherpa-onnx 示例 `Obama.wav` 的 30 秒偏移片段；真实键盘负样本可从 ESC-50 每个 fold 各取一份 `Keyboard typing` 样本。ESC-50 使用 CC BY-NC 3.0，仅用于本机临时回归，不随项目再分发。所有 fixture 都只从临时目录读取，不播放、不改写，不得提交 Git、打进 EXE、复制到 `release-staging` 或用户数据目录。测试需覆盖媒体单独播放、键盘峰值高于媒体以及真实键盘与音乐/人声混音；键盘单独不得累计，键盘与媒体同时存在时不得被键盘标签放行。
+
 ## 隔离启动开发版
+
+本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.11.0 后台验证明确跳过本节及后续全部 UI/CDP 脚本。
 
 为每个 UI 测试创建新的数据目录和端口：
 
@@ -129,7 +154,7 @@ Start-Process -FilePath (Join-Path $candidateRoot '背书自习监督.exe') -Arg
 - 初始界面先显示“开始学习”，提醒不会抢先出现；主学习面板的出声状态始终可见。
 - 开始前测试使用 audio-only 正式链路；滑块在测试中实时生效。背书测试必须与正式会话共享最多 3 秒的在途声纹验证宽限；最终达到阈值只能显示预期提醒提示，不能改变 `active`、有效时长、提醒次数、生命值、场景轨迹或音轨轨迹。
 - 检测面板收起时，常驻音量条白线仍可通过 pointer 和键盘改变设置；两条白线、range、ARIA、localStorage、VAD 与 `QuietModeDetector` 必须同步，位置按当前底噪与相对灵敏度换算。
-- 自习预检先达到 3 秒阈值再改为 15 秒或改变门槛时，旧锁定/累计必须立即清零，并能按新阈值从头累计。
+- 自习预检首次有效分类约需 2 秒，之后约每 1 秒更新；三个连续阳性窗口抵扣重叠后只能累计约 2 秒，第四个才可达到 3 秒门槛。预检或正式学习中改变时长/门槛时，旧分类缓冲、在途 generation、锁定和累计必须立即清零，并能从新的约 2 秒窗口重新暖机。
 - 背书无声纹时不能伪装成本人检测；停止测试、开始学习、切换模式、声纹录入、最小化/隐藏窗口和退出都必须释放测试音频流，正式开始后最多只有一条麦克风音轨。选中的麦克风必须持久化，且待命测试与正式链路均使用其精确 `deviceId`。
 - 声纹服务须保留最多五份同一用户模板；删除一份后其余模板仍可识别，schema 2 单份档案可安全载入为“原有声纹”。
 - 使用当前 Windows 用户的 DPAPI 加密一份隔离声纹档案后，必须能由新的 Node/PowerShell 子进程解密；测试不得接触真实 `speaker-profile.dat`。
@@ -138,11 +163,12 @@ Start-Process -FilePath (Join-Path $candidateRoot '背书自习监督.exe') -Arg
 - 主窗口标题栏可拖动、双击最大化/还原；最小化、最大化/还原和隐藏到后台三键均可用，顺序正确，960×540 下不与模式按钮或页面按钮重叠。
 - 主窗口、子 frame 与休息提示页不能越权调用不属于自己的 IPC；新窗口和非预期导航会被拒绝。
 - 默认只有一个主窗口；休息提示出现时恰好两个窗口且不替换主 webContents；违规仍恢复同一个主窗口。
-- 背书阈值 20～60 秒、自习持续人声阈值 3～15 秒均正确钳制；键盘瞬态不累计成自习违规。
+- 背书阈值 20～60 秒、自习媒体证据阈值 3～15 秒均正确钳制；键盘单独不累计，键盘与媒体双证据仍累计，单个约 1 秒分类缺口不增加证据时长且更长缺口会重置。
 - 背书 20 分钟、自习 45 分钟各获得一张两分钟休息券；休息不计时，结束后主窗前台且只播放一次有声 `E1 → S1 → X1`。
 - 普通动画静音；开场、结束、违规、里程碑表扬和休息恢复音轨与画面一一对应。
 - 表扬字幕位于下侧且不遮挡教官或按钮；背书每 45 分钟、自习每 60 分钟触发。
 - 无摄像头、无音频导入、无黑帧、无按钮重叠。
 - 主场景和休息提示均使用 `cache: false` 的内存会话，退出后隔离数据目录不出现 `SessionData`、`Code Cache` 或 `GPUCache`；只有用户主动录入时才允许存在 `speaker-profile.dat`。
+- 自习分类的 PCM、标签和概率只存在于渲染器、IPC 与 Worker 内存中；隔离数据目录、日志、报告和发布包不得出现分类输入或运行结果。静音视频、耳机输出、极端声学掩蔽与合法课程音频的边界必须在发布说明中保留。
 - 媒体或窗口 IPC 失败后回到 `idle`，麦克风、有效时钟、遮罩和置顶提醒状态均被清理。
 - 测试结束后隔离 profile、麦克风流和进程均被清理。

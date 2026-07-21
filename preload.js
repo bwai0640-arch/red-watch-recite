@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   cancelSpeakerEnrollment: () => ipcRenderer.invoke('speaker:cancel-enrollment'),
   verifySpeaker: (payload) => ipcRenderer.invoke('speaker:verify', payload),
   deleteSpeakerProfile: (profileId) => ipcRenderer.invoke('speaker:delete-profile', { profileId }),
+  getAudioEventState: () => ipcRenderer.invoke('audio-event:get-state'),
+  classifyAudioEvents: (payload) => ipcRenderer.invoke('audio-event:classify', payload),
   quitApp: () => ipcRenderer.invoke('quit-app'),
   onWindowModeChanged: (callback) => {
     return subscribe('window-mode-changed', callback);

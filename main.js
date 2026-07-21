@@ -14,6 +14,7 @@ const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { SpeakerService } = require('./speaker-service');
+const { AudioEventService } = require('./audio-event-service');
 const { createProfileCrypto } = require('./profile-crypto');
 
 const presentationCanvas = { width: 1920, height: 1080 };
@@ -70,12 +71,14 @@ let tray = null;
 let isQuitting = false;
 let mainWindowMode = 'scene';
 let speakerService = null;
+let audioEventService = null;
 let breakPromptWindow = null;
 let breakPromptState = null;
 let isDestroyingBreakPrompt = false;
 let runtimeSession = null;
 
 const speakerModelFile = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx';
+const audioEventModelDirectory = 'audio-tagging-ced-mini';
 const breakPromptSize = Object.freeze({ width: 420, height: 220 });
 const breakPromptMargin = 20;
 
@@ -547,6 +550,21 @@ function registerSpeakerIpc() {
   ipcMain.handle('speaker:delete-profile', trustedHandler((payload) => speakerService.deleteProfile(payload?.profileId)));
 }
 
+function registerAudioEventIpc() {
+  const trustedHandler = (handler) => async (event, payload) => {
+    if (!isTrustedRenderer(event)) throw new Error('拒绝非本应用页面访问声音分类服务。');
+    try {
+      return await handler(payload);
+    } catch (error) {
+      console.error('[audio-event]', error);
+      throw new Error(error?.publicMessage || error?.message || '声音分类失败。');
+    }
+  };
+
+  ipcMain.handle('audio-event:get-state', trustedHandler(() => audioEventService.getState()));
+  ipcMain.handle('audio-event:classify', trustedHandler((payload) => audioEventService.classify(payload)));
+}
+
 function registerBreakPromptIpc() {
   ipcMain.handle('break-prompt:show', trustedRendererHandler((_event, payload) => {
     breakPromptState = validateBreakPromptPayload(payload);
@@ -619,8 +637,18 @@ app.whenReady().then(async () => {
     profileCrypto: createProfileCrypto(),
   });
   registerSpeakerIpc();
-  const speakerState = await speakerService.initialize();
+  audioEventService = new AudioEventService({
+    workerPath: unpackedResourcePath('audio-event-worker.js'),
+    modelPath: unpackedResourcePath('models', audioEventModelDirectory, 'model.int8.onnx'),
+    labelsPath: unpackedResourcePath('models', audioEventModelDirectory, 'class_labels_indices.csv'),
+  });
+  registerAudioEventIpc();
+  const [speakerState, audioEventState] = await Promise.all([
+    speakerService.initialize(),
+    audioEventService.initialize(),
+  ]);
   if (!speakerState.ready) console.error('[speaker] initialization failed:', speakerState.error);
+  if (!audioEventState.ready) console.error('[audio-event] initialization failed:', audioEventState.error);
 
   createMainWindow();
   createTray();
@@ -630,6 +658,7 @@ app.on('before-quit', () => {
   isQuitting = true;
   destroyBreakPromptWindow();
   speakerService?.dispose().catch(() => {});
+  audioEventService?.dispose().catch(() => {});
 });
 app.on('will-quit', clearTransientSessionData);
 app.on('will-quit', scheduleTransientSessionDataCleanup);

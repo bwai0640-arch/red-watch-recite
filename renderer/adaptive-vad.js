@@ -22,6 +22,7 @@
     constructor(options = {}) {
       this.calibrationFrames = options.calibrationFrames || 30;
       this.sensitivityDb = options.sensitivityDb || 8;
+      this.freezeNoiseFloor = Boolean(options.freezeNoiseFloor);
       this.reset();
     }
 
@@ -100,7 +101,7 @@
       else if (this.hangoverFrames > 0) this.hangoverFrames -= 1;
       const isSpeech = this.speechScore >= 3 || this.hangoverFrames > 0;
 
-      if (!isSpeech) {
+      if (!isSpeech && !this.freezeNoiseFloor) {
         if (steadyNoise) {
           const steadyLevel = median(recentLevels);
           this.noiseFloorDb += clamp(steadyLevel - this.noiseFloorDb, -0.5, 0.5);

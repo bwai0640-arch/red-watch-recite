@@ -28,6 +28,22 @@
   const QUIET_SENSITIVITY_DB = Object.freeze({ minimum: 6, maximum: 16, default: 10 });
   const DEFAULT_FRAME_MS = 100;
   const DEFAULT_REARM_QUIET_SECONDS = 1;
+  const STUDY_AUDIO_EVENT_THRESHOLDS = Object.freeze({
+    media: 0.20,
+    broadcast: 0.12,
+    keyboard: 0.18,
+    keyboardMixedMedia: 0.10,
+    keyboardMixedMediaSecondary: 0.025,
+  });
+  const KEYBOARD_EVENT_NAMES = new Set([
+    'typing',
+    'typewriter',
+    'computer keyboard',
+    'clicking',
+    'clickety-clack',
+  ]);
+  const BROADCAST_EVENT_NAMES = new Set(['television', 'radio']);
+  const MEDIA_EVENT_PATTERN = /(?:speech|conversation|narration|monologue|voice|vocal|sing|music|choir|a capella|television|radio|video game|laughter|chatter|hubbub|shout|yell|scream|whisper|rapping|chant)/iu;
 
   function clamp(value, minimum, maximum) {
     return Math.min(maximum, Math.max(minimum, value));
@@ -59,6 +75,92 @@
     const number = Number(value);
     if (!Number.isFinite(number)) return QUIET_SENSITIVITY_DB.default;
     return clamp(number, QUIET_SENSITIVITY_DB.minimum, QUIET_SENSITIVITY_DB.maximum);
+  }
+
+  function normalizeAudioEvent(event) {
+    const name = String(event?.name || '').trim();
+    const probability = clamp(Number(event?.prob) || 0, 0, 1);
+    return { name, normalizedName: name.toLocaleLowerCase('en-US'), probability };
+  }
+
+  function classifyStudyAudioEvents(events, options = {}) {
+    const mediaThreshold = clamp(
+      Number(options.mediaThreshold) || STUDY_AUDIO_EVENT_THRESHOLDS.media,
+      0,
+      1,
+    );
+    const broadcastThreshold = clamp(
+      Number(options.broadcastThreshold) || STUDY_AUDIO_EVENT_THRESHOLDS.broadcast,
+      0,
+      1,
+    );
+    const keyboardThreshold = clamp(
+      Number(options.keyboardThreshold) || STUDY_AUDIO_EVENT_THRESHOLDS.keyboard,
+      0,
+      1,
+    );
+    const keyboardMixedMediaThreshold = clamp(
+      Number(options.keyboardMixedMediaThreshold) || STUDY_AUDIO_EVENT_THRESHOLDS.keyboardMixedMedia,
+      0,
+      1,
+    );
+    const keyboardMixedMediaSecondaryThreshold = clamp(
+      Number(options.keyboardMixedMediaSecondaryThreshold)
+        || STUDY_AUDIO_EVENT_THRESHOLDS.keyboardMixedMediaSecondary,
+      0,
+      1,
+    );
+    const levelDeltaDb = Number(options.levelDeltaDb);
+    const sensitivityDb = normalizeQuietSensitivityDb(options.sensitivityDb);
+    const aboveLevelThreshold = !Number.isFinite(levelDeltaDb) || levelDeltaDb >= sensitivityDb;
+
+    let topMedia = { name: '', probability: 0 };
+    let secondaryMedia = { name: '', probability: 0 };
+    let topBroadcast = { name: '', probability: 0 };
+    let topKeyboard = { name: '', probability: 0 };
+    for (const rawEvent of Array.isArray(events) ? events : []) {
+      const event = normalizeAudioEvent(rawEvent);
+      if (!event.name) continue;
+      if (KEYBOARD_EVENT_NAMES.has(event.normalizedName) && event.probability > topKeyboard.probability) {
+        topKeyboard = { name: event.name, probability: event.probability };
+      }
+      if (BROADCAST_EVENT_NAMES.has(event.normalizedName) && event.probability > topBroadcast.probability) {
+        topBroadcast = { name: event.name, probability: event.probability };
+      }
+      if (MEDIA_EVENT_PATTERN.test(event.normalizedName)) {
+        if (event.probability > topMedia.probability) {
+          secondaryMedia = topMedia;
+          topMedia = { name: event.name, probability: event.probability };
+        } else if (event.probability > secondaryMedia.probability) {
+          secondaryMedia = { name: event.name, probability: event.probability };
+        }
+      }
+    }
+
+    const keyboardEvidence = topKeyboard.probability >= keyboardThreshold;
+    const keyboardMixedMediaEvidence = keyboardEvidence
+      && topMedia.probability >= keyboardMixedMediaThreshold
+      && secondaryMedia.probability >= keyboardMixedMediaSecondaryThreshold;
+    const mediaEvidence = aboveLevelThreshold && (
+      topMedia.probability >= mediaThreshold
+      || topBroadcast.probability >= broadcastThreshold
+      || keyboardMixedMediaEvidence
+    );
+    return Object.freeze({
+      mediaEvidence,
+      keyboardEvidence,
+      keyboardOnly: keyboardEvidence && !mediaEvidence,
+      keyboardMixedMediaEvidence,
+      aboveLevelThreshold,
+      mediaScore: topMedia.probability,
+      mediaLabel: topMedia.name,
+      secondaryMediaScore: secondaryMedia.probability,
+      secondaryMediaLabel: secondaryMedia.name,
+      broadcastScore: topBroadcast.probability,
+      broadcastLabel: topBroadcast.name,
+      keyboardScore: topKeyboard.probability,
+      keyboardLabel: topKeyboard.name,
+    });
   }
 
   class EffectiveStudyClock {
@@ -189,19 +291,36 @@
         SECOND_MS,
         nonNegativeFinite(options.rearmQuietSeconds, DEFAULT_REARM_QUIET_SECONDS) * SECOND_MS,
       );
+      this.evidenceGapToleranceMs = Math.max(
+        0,
+        nonNegativeFinite(options.evidenceGapSeconds, 0) * SECOND_MS,
+      );
+      this.evidenceOverlapMs = Math.max(
+        0,
+        nonNegativeFinite(options.evidenceOverlapSeconds, 0) * SECOND_MS,
+      );
       this.defaultFrameMs = Math.max(1, nonNegativeFinite(options.frameMs, DEFAULT_FRAME_MS));
       this.reset();
     }
 
     reset() {
       this.armed = true;
+      this.rawEvidenceMs = 0;
       this.suspectedSpeechMs = 0;
       this.quietMs = 0;
+      this.evidenceGapMs = 0;
     }
 
     setViolationSeconds(value) {
       this.violationSeconds = normalizeViolationSeconds('study', value);
-      this.suspectedSpeechMs = Math.min(this.suspectedSpeechMs, this.violationThresholdMs());
+      this.rawEvidenceMs = Math.min(
+        this.rawEvidenceMs,
+        this.violationThresholdMs() + this.evidenceOverlapMs,
+      );
+      this.suspectedSpeechMs = Math.min(
+        Math.max(0, this.rawEvidenceMs - this.evidenceOverlapMs),
+        this.violationThresholdMs(),
+      );
       return this.violationSeconds;
     }
 
@@ -215,6 +334,7 @@
     }
 
     rawSpeechEvidence(feature = {}) {
+      if (typeof feature.mediaEvidence === 'boolean') return feature.mediaEvidence;
       if (typeof feature.speechEvidence === 'boolean') return feature.speechEvidence;
       if (typeof feature.suspectedSpeech === 'boolean') return feature.suspectedSpeech;
 
@@ -244,7 +364,9 @@
       let rearmed = false;
 
       if (!this.armed) {
+        this.rawEvidenceMs = 0;
         this.suspectedSpeechMs = 0;
+        this.evidenceGapMs = 0;
         if (evidence) {
           this.quietMs = 0;
         } else {
@@ -257,17 +379,32 @@
         }
       } else if (evidence) {
         this.quietMs = 0;
-        this.suspectedSpeechMs += durationMs;
+        this.evidenceGapMs = 0;
+        this.rawEvidenceMs += durationMs;
+        this.suspectedSpeechMs = Math.max(0, this.rawEvidenceMs - this.evidenceOverlapMs);
         if (this.suspectedSpeechMs >= this.violationThresholdMs()) {
           violated = true;
           this.armed = false;
+          this.rawEvidenceMs = 0;
           this.suspectedSpeechMs = 0;
           this.quietMs = 0;
+          this.evidenceGapMs = 0;
         }
       } else {
-        // Quiet-study violations require continuous raw evidence. A VAD hangover,
-        // an isolated key press, or any quiet gap breaks the candidate interval.
-        this.suspectedSpeechMs = 0;
+        // Preserve a candidate through one short classification gap, but reset
+        // both raw and overlap-adjusted evidence once the tolerance expires.
+        if (this.rawEvidenceMs > 0 && this.evidenceGapToleranceMs > 0) {
+          this.evidenceGapMs += durationMs;
+          if (this.evidenceGapMs > this.evidenceGapToleranceMs) {
+            this.rawEvidenceMs = 0;
+            this.suspectedSpeechMs = 0;
+            this.evidenceGapMs = 0;
+          }
+        } else {
+          this.rawEvidenceMs = 0;
+          this.suspectedSpeechMs = 0;
+          this.evidenceGapMs = 0;
+        }
       }
 
       return Object.freeze({
@@ -275,21 +412,29 @@
         violated,
         rearmed,
         armed: this.armed,
+        rawEvidenceMs: this.rawEvidenceMs,
         suspectedSpeechMs: this.suspectedSpeechMs,
         quietMs: this.quietMs,
+        evidenceGapMs: this.evidenceGapMs,
         violationThresholdMs: this.violationThresholdMs(),
         rearmQuietMs: this.rearmQuietMs,
+        evidenceGapToleranceMs: this.evidenceGapToleranceMs,
+        evidenceOverlapMs: this.evidenceOverlapMs,
       });
     }
 
     snapshot() {
       return Object.freeze({
         armed: this.armed,
+        rawEvidenceMs: this.rawEvidenceMs,
         suspectedSpeechMs: this.suspectedSpeechMs,
         quietMs: this.quietMs,
+        evidenceGapMs: this.evidenceGapMs,
         violationSeconds: this.violationSeconds,
         sensitivityDb: this.sensitivityDb,
         rearmQuietMs: this.rearmQuietMs,
+        evidenceGapToleranceMs: this.evidenceGapToleranceMs,
+        evidenceOverlapMs: this.evidenceOverlapMs,
       });
     }
   }
@@ -297,11 +442,13 @@
   return Object.freeze({
     MODE_RULES,
     QUIET_SENSITIVITY_DB,
+    STUDY_AUDIO_EVENT_THRESHOLDS,
     EffectiveStudyClock,
     MilestoneLedger,
     QuietModeDetector,
     getModeRules,
     normalizeViolationSeconds,
     normalizeQuietSensitivityDb,
+    classifyStudyAudioEvents,
   });
 }));
