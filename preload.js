@@ -8,10 +8,14 @@ function subscribe(channel, callback) {
 }
 
 contextBridge.exposeInMainWorld('desktopAPI', {
-  hideToBackground: () => ipcRenderer.invoke('hide-to-background'),
+  getBackgroundPreference: () => ipcRenderer.invoke('background-preference:get'),
+  setBackgroundPreference: (mode) => ipcRenderer.invoke('background-preference:set', { mode }),
+  hideToBackground: (mode) => ipcRenderer.invoke('hide-to-background', { mode }),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),
   restoreSceneMode: () => ipcRenderer.invoke('restore-scene-mode'),
+  forceRestoreSceneMode: () => ipcRenderer.invoke('force-restore-scene-mode'),
+  acknowledgeWindowMode: (payload) => ipcRenderer.send('window-mode-ready', payload),
   revealForInlineAlert: () => ipcRenderer.invoke('reveal-for-inline-alert'),
   finishInlineAlert: (payload) => ipcRenderer.invoke('finish-inline-alert', payload),
   getAnimationCanvas: () => ipcRenderer.invoke('get-animation-canvas'),
@@ -32,6 +36,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   },
   onWindowMaximizedChanged: (callback) => {
     return subscribe('window-maximized-changed', callback);
+  },
+  onWindowCloseRequested: (callback) => {
+    return subscribe('window-close-requested', callback);
   },
 });
 

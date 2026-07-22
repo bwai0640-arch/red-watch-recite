@@ -16,6 +16,16 @@ const { spawn } = require('node:child_process');
 const { SpeakerService } = require('./speaker-service');
 const { AudioEventService } = require('./audio-event-service');
 const { createProfileCrypto } = require('./profile-crypto');
+const {
+  clampFloatingBounds,
+  floatingWindowBounds,
+  readBackgroundPreference,
+  resolveAlertReturnMode,
+  validateBackgroundModePayload,
+  validateFinishAlertPayload,
+  validateWindowModeReadyPayload,
+  writeBackgroundPreference,
+} = require('./window-mode-policy');
 
 const presentationCanvas = { width: 1920, height: 1080 };
 const mainRendererUrl = 'rwt://renderer/index.html';
@@ -29,6 +39,7 @@ app.setName('背书自习监督');
 const persistentDataRoot = process.env.SUPERVISION_DATA_DIR
   || path.join(app.getPath('appData'), '背书自习监督');
 fsSync.mkdirSync(persistentDataRoot, { recursive: true });
+const windowPreferencePath = path.join(persistentDataRoot, 'window-preferences.json');
 const transientSessionParent = path.join(persistentDataRoot, 'TransientElectronData');
 fsSync.mkdirSync(transientSessionParent, { recursive: true });
 
@@ -74,13 +85,27 @@ let speakerService = null;
 let audioEventService = null;
 let breakPromptWindow = null;
 let breakPromptState = null;
+let breakPromptSuppressedForAlert = false;
 let isDestroyingBreakPrompt = false;
 let runtimeSession = null;
+let inlineAlertSequence = 0;
+let inlineAlertState = null;
+let floatingRestoreBounds = null;
+let mainWindowSkipsTaskbar = false;
+let windowModeTransitionSequence = 0;
+let windowTransitionChain = Promise.resolve();
+let backgroundPreferenceWriteChain = Promise.resolve();
+const pendingWindowModeTransitions = new Map();
+let backgroundPreference = readBackgroundPreference(windowPreferencePath);
 
 const speakerModelFile = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx';
 const audioEventModelDirectory = 'audio-tagging-ced-mini';
 const breakPromptSize = Object.freeze({ width: 420, height: 220 });
 const breakPromptMargin = 20;
+const sceneMinimumSize = Object.freeze({ width: 960, height: 540 });
+const floatingWindowSize = Object.freeze({ width: 320, height: 225 });
+const floatingWindowMargin = 16;
+const windowModeRenderTimeoutMs = 1000;
 
 const contentTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -159,6 +184,38 @@ function breakPromptBounds() {
   };
 }
 
+function setFloatingBounds(bounds) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBounds(bounds, false);
+}
+
+function positionFloatingWindow({ avoidBreakPrompt = false, useSavedPosition = true } = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const display = currentDisplay();
+  const area = display.workArea;
+  const defaultBounds = floatingWindowBounds(area, {
+    size: floatingWindowSize,
+    margin: floatingWindowMargin,
+  });
+  if (!floatingRestoreBounds) floatingRestoreBounds = { ...defaultBounds };
+  let bounds;
+  if (useSavedPosition && floatingRestoreBounds && !avoidBreakPrompt) {
+    bounds = clampFloatingBounds(floatingRestoreBounds, area, floatingWindowSize);
+  } else {
+    bounds = floatingWindowBounds(area, {
+      size: floatingWindowSize,
+      margin: floatingWindowMargin,
+      avoidBottomRight: avoidBreakPrompt ? breakPromptBounds() : null,
+    });
+  }
+  setFloatingBounds(bounds);
+}
+
+function restoreFloatingPositionAfterPrompt() {
+  if (mainWindowMode !== 'floating') return;
+  positionFloatingWindow({ avoidBreakPrompt: false, useSavedPosition: true });
+}
+
 function validateBreakPromptPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('休息提示参数无效。');
@@ -194,9 +251,18 @@ function sendBreakPromptState() {
 function presentBreakPrompt() {
   if (!breakPromptWindow || breakPromptWindow.isDestroyed()) return;
   if (breakPromptWindow.webContents.isLoadingMainFrame()) return;
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    breakPromptSuppressedForAlert = true;
+    breakPromptWindow.hide();
+    return;
+  }
+  breakPromptSuppressedForAlert = false;
   breakPromptWindow.setBounds(breakPromptBounds(), false);
   breakPromptWindow.setAlwaysOnTop(true, 'floating');
   breakPromptWindow.showInactive();
+  if (mainWindowMode === 'floating') {
+    positionFloatingWindow({ avoidBreakPrompt: true, useSavedPosition: false });
+  }
 }
 
 function createBreakPromptWindow() {
@@ -234,9 +300,7 @@ function createBreakPromptWindow() {
     if (prompt !== breakPromptWindow || prompt.isDestroyed()) return;
     if (!breakPromptState || prompt.webContents.isDestroyed()) return;
     prompt.webContents.send('break-prompt:state', { ...breakPromptState });
-    prompt.setBounds(breakPromptBounds(), false);
-    prompt.setAlwaysOnTop(true, 'floating');
-    prompt.showInactive();
+    presentBreakPrompt();
   });
   prompt.on('close', (event) => {
     if (isQuitting || isDestroyingBreakPrompt) return;
@@ -253,6 +317,7 @@ function createBreakPromptWindow() {
 function destroyBreakPromptWindow() {
   const prompt = breakPromptWindow;
   breakPromptState = null;
+  breakPromptSuppressedForAlert = false;
   if (!prompt || prompt.isDestroyed()) {
     breakPromptWindow = null;
     return;
@@ -271,6 +336,81 @@ function sendWindowMode(mode, extra = {}) {
   mainWindow.webContents.send('window-mode-changed', { mode, ...extra });
 }
 
+function requestWindowModeRender(mode, extra = {}) {
+  const window = mainWindow;
+  if (
+    !window
+    || window.isDestroyed()
+    || window.webContents.isDestroyed()
+    || window.webContents.isLoadingMainFrame()
+  ) return Promise.resolve(false);
+
+  const transitionId = ++windowModeTransitionSequence;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingWindowModeTransitions.delete(transitionId);
+      resolve(false);
+    }, windowModeRenderTimeoutMs);
+    pendingWindowModeTransitions.set(transitionId, { mode, resolve, timeout });
+    window.webContents.send('window-mode-changed', { ...extra, mode, transitionId });
+  });
+}
+
+function completeWindowModeTransition(payload) {
+  const { transitionId, mode } = validateWindowModeReadyPayload(payload);
+  const pending = pendingWindowModeTransitions.get(transitionId);
+  if (!pending || pending.mode !== mode) return false;
+  clearTimeout(pending.timeout);
+  pendingWindowModeTransitions.delete(transitionId);
+  pending.resolve(true);
+  return true;
+}
+
+function clearPendingWindowModeTransitions() {
+  for (const pending of pendingWindowModeTransitions.values()) {
+    clearTimeout(pending.timeout);
+    pending.resolve(false);
+  }
+  pendingWindowModeTransitions.clear();
+}
+
+function enqueueWindowTransition(task) {
+  const result = windowTransitionChain.then(task, task);
+  windowTransitionChain = result.catch(() => {});
+  return result;
+}
+
+function setMainWindowSkipTaskbar(value) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setSkipTaskbar(value);
+  mainWindowSkipsTaskbar = Boolean(value);
+}
+
+function failClosedWindowTransition(expectedMode) {
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  inlineAlertState = null;
+  mainWindowMode = 'hidden';
+  mainWindow.setAlwaysOnTop(false);
+  setMainWindowSkipTaskbar(true);
+  sendWindowMode('hidden');
+  mainWindow.hide();
+  return { renderTimedOut: true, expectedMode, ...runtimeWindowState() };
+}
+
+function suppressBreakPromptForAlert() {
+  if (!breakPromptState || !breakPromptWindow || breakPromptWindow.isDestroyed()) return;
+  breakPromptSuppressedForAlert = true;
+  breakPromptWindow.hide();
+}
+
+function restoreBreakPromptAfterAlert() {
+  if (!breakPromptSuppressedForAlert) return;
+  breakPromptSuppressedForAlert = false;
+  if (breakPromptState && breakPromptWindow && !breakPromptWindow.isDestroyed()) {
+    presentBreakPrompt();
+  }
+}
+
 function sendWindowMaximized() {
   const window = mainWindow;
   if (!window || window.isDestroyed()) return;
@@ -285,8 +425,8 @@ function createMainWindow() {
   const bounds = fitPresentationBounds(screen.getPrimaryDisplay());
   mainWindow = new BrowserWindow({
     ...bounds,
-    minWidth: 960,
-    minHeight: 540,
+    minWidth: sceneMinimumSize.width,
+    minHeight: sceneMinimumSize.height,
     resizable: true,
     minimizable: true,
     maximizable: true,
@@ -318,79 +458,191 @@ function createMainWindow() {
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    hideToBackground();
+    const contents = mainWindow.webContents;
+    if (!contents.isDestroyed() && !contents.isLoadingMainFrame()) {
+      contents.send('window-close-requested');
+    } else {
+      hideToBackground('hidden').catch(() => {});
+    }
   });
   mainWindow.on('maximize', sendWindowMaximized);
   mainWindow.on('unmaximize', sendWindowMaximized);
   mainWindow.on('minimize', () => sendWindowMode(mainWindowMode, { minimized: true }));
+  mainWindow.on('will-move', (_event, nextBounds) => {
+    if (mainWindowMode !== 'floating') return;
+    const display = screen.getDisplayMatching(nextBounds);
+    floatingRestoreBounds = clampFloatingBounds(nextBounds, display.workArea, floatingWindowSize);
+  });
   mainWindow.on('closed', () => {
+    clearPendingWindowModeTransitions();
     mainWindow = null;
+    mainWindowSkipsTaskbar = false;
     destroyBreakPromptWindow();
   });
 }
 
-function showSceneWindow() {
+async function showSceneWindowNow({ force = false } = {}) {
   if (!mainWindow) createMainWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (!force && mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  if (mainWindowMode === 'scene' && !inlineAlertState) {
+    mainWindow.setAlwaysOnTop(false);
+    setMainWindowSkipTaskbar(false);
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    else if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    return runtimeWindowState();
+  }
+  const targetDisplay = currentDisplay();
+  mainWindow.hide();
+  inlineAlertState = null;
   mainWindowMode = 'scene';
+  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
   mainWindow.setAlwaysOnTop(false);
-  mainWindow.setSkipTaskbar(false);
+  setMainWindowSkipTaskbar(false);
   mainWindow.setResizable(true);
+  mainWindow.setMinimizable(true);
+  mainWindow.setMaximizable(true);
   mainWindow.setFullScreen(false);
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setBounds(fitPresentationBounds(currentDisplay()), true);
-  mainWindow.show();
-  mainWindow.restore();
+  mainWindow.setBounds(fitPresentationBounds(targetDisplay), false);
+  const rendered = await requestWindowModeRender('scene');
+  if (!rendered) return failClosedWindowTransition('scene');
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  else mainWindow.show();
   mainWindow.focus();
-  sendWindowMode('scene');
+  return runtimeWindowState();
 }
 
-function hideToBackground() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+function showSceneWindow(options = {}) {
+  return enqueueWindowTransition(() => showSceneWindowNow(options));
+}
+
+async function showFloatingWindowNow() {
+  if (!mainWindow) createMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  if (mainWindowMode === 'floating') {
+    mainWindow.setAlwaysOnTop(true, 'floating');
+    setMainWindowSkipTaskbar(true);
+    positionFloatingWindow({
+      avoidBreakPrompt: Boolean(breakPromptState && breakPromptWindow?.isVisible()),
+      useSavedPosition: true,
+    });
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.showInactive();
+    mainWindow.blur();
+    return runtimeWindowState();
+  }
+  inlineAlertState = null;
+  mainWindow.hide();
+  mainWindowMode = 'floating';
+  mainWindow.setFullScreen(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  mainWindow.setMinimumSize(floatingWindowSize.width, floatingWindowSize.height);
+  mainWindow.setResizable(false);
+  mainWindow.setMinimizable(false);
+  mainWindow.setMaximizable(false);
+  setMainWindowSkipTaskbar(true);
+  mainWindow.setAlwaysOnTop(true, 'floating');
+  positionFloatingWindow({
+    avoidBreakPrompt: Boolean(breakPromptState && breakPromptWindow?.isVisible()),
+    useSavedPosition: true,
+  });
+  const rendered = await requestWindowModeRender('floating');
+  if (!rendered) return failClosedWindowTransition('floating');
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.showInactive();
+  mainWindow.blur();
+  return runtimeWindowState();
+}
+
+function showFloatingWindow() {
+  return enqueueWindowTransition(() => showFloatingWindowNow());
+}
+
+async function hideToBackgroundNow(mode = 'hidden') {
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  if (mode === 'floating') return showFloatingWindowNow();
+  if (mainWindowMode === 'hidden') {
+    mainWindow.hide();
+    return runtimeWindowState();
+  }
+  inlineAlertState = null;
   mainWindowMode = 'hidden';
+  mainWindow.setAlwaysOnTop(false);
+  setMainWindowSkipTaskbar(true);
   sendWindowMode('hidden');
   mainWindow.hide();
+  return runtimeWindowState();
+}
+
+function hideToBackground(mode = 'hidden') {
+  return enqueueWindowTransition(() => hideToBackgroundNow(mode));
+}
+
+async function revealForInlineAlertNow() {
+  if (!mainWindow) createMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return { alertId: 0, returnMode: 'scene' };
+  if (mainWindowMode === 'alert' && inlineAlertState) return { ...inlineAlertState };
+  const returnMode = resolveAlertReturnMode(mainWindowMode, mainWindow.isVisible());
+  const targetDisplay = currentDisplay();
+  if (returnMode === 'floating') floatingRestoreBounds = mainWindow.getBounds();
+  suppressBreakPromptForAlert();
+  inlineAlertState = { alertId: ++inlineAlertSequence, returnMode };
+  mainWindow.hide();
+  mainWindowMode = 'alert';
+  mainWindow.setFullScreen(false);
+  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
+  mainWindow.setResizable(true);
+  mainWindow.setMinimizable(false);
+  mainWindow.setMaximizable(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  mainWindow.setBounds(fitPresentationBounds(targetDisplay), false);
+  setMainWindowSkipTaskbar(false);
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  const rendered = await requestWindowModeRender('alert');
+  if (!rendered) {
+    const failed = failClosedWindowTransition('alert');
+    restoreBreakPromptAfterAlert();
+    throw Object.assign(new Error('提醒窗口布局未能及时就绪。'), { windowState: failed });
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  else mainWindow.show();
+  mainWindow.focus();
+  return { ...inlineAlertState };
 }
 
 function revealForInlineAlert() {
-  if (!mainWindow) createMainWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return { returnToHidden: false };
-  const returnToHidden = mainWindowMode === 'hidden' || !mainWindow.isVisible();
-  mainWindowMode = 'alert';
-  mainWindow.setFullScreen(false);
-  mainWindow.setResizable(true);
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setBounds(fitPresentationBounds(currentDisplay()), false);
-  mainWindow.setSkipTaskbar(false);
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.show();
-  mainWindow.restore();
-  mainWindow.focus();
-  sendWindowMode('alert');
-  return { returnToHidden };
+  return enqueueWindowTransition(() => revealForInlineAlertNow());
 }
 
-function validateFinishInlineAlertPayload(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('提醒结束参数无效。');
+async function finishInlineAlertNow(payload) {
+  const { alertId, disposition } = validateFinishAlertPayload(payload);
+  if (!mainWindow || mainWindow.isDestroyed()) return { ignored: true };
+  if (!inlineAlertState || inlineAlertState.alertId !== alertId || mainWindowMode !== 'alert') {
+    return { ignored: true, ...runtimeWindowState() };
   }
-  const keys = Reflect.ownKeys(payload);
-  if (keys.length !== 1 || keys[0] !== 'returnToHidden'
-    || typeof payload.returnToHidden !== 'boolean') {
-    throw new Error('提醒结束参数字段无效。');
+  const returnMode = disposition === 'scene' ? 'scene' : inlineAlertState.returnMode;
+  inlineAlertState = null;
+  try {
+    if (returnMode === 'floating') return await showFloatingWindowNow();
+    if (returnMode === 'hidden') return await hideToBackgroundNow('hidden');
+    return await showSceneWindowNow({ force: true });
+  } finally {
+    restoreBreakPromptAfterAlert();
   }
-  return { returnToHidden: payload.returnToHidden };
 }
 
 function finishInlineAlert(payload) {
-  const { returnToHidden } = validateFinishInlineAlertPayload(payload);
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (returnToHidden) {
-    mainWindow.setAlwaysOnTop(false);
-    hideToBackground();
-    return;
-  }
-  showSceneWindow();
+  return enqueueWindowTransition(() => finishInlineAlertNow(payload));
 }
 
 function runtimeWindowState() {
@@ -404,6 +656,12 @@ function runtimeWindowState() {
       minimized: false,
       maximized: false,
       minimumSize: { width: 0, height: 0 },
+      bounds: null,
+      alwaysOnTop: false,
+      skipTaskbar: false,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
     };
   }
   const contents = window.webContents;
@@ -416,6 +674,12 @@ function runtimeWindowState() {
     minimized: window.isMinimized(),
     maximized: window.isMaximized(),
     minimumSize: { width: minimumWidth, height: minimumHeight },
+    bounds: window.getBounds(),
+    alwaysOnTop: window.isAlwaysOnTop(),
+    skipTaskbar: mainWindowSkipsTaskbar,
+    resizable: window.isResizable(),
+    minimizable: window.isMinimizable(),
+    maximizable: window.isMaximizable(),
   };
 }
 
@@ -456,17 +720,31 @@ function scheduleTransientSessionDataCleanup() {
   }
 }
 
-function minimizeMainWindow() {
+function minimizeMainWindowNow() {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode !== 'scene' || inlineAlertState) {
+    return { blockedByMode: true, ...runtimeWindowState() };
+  }
   mainWindow.minimize();
   return runtimeWindowState();
 }
 
-function toggleMainWindowMaximized() {
+function minimizeMainWindow() {
+  return enqueueWindowTransition(() => minimizeMainWindowNow());
+}
+
+function toggleMainWindowMaximizedNow() {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode !== 'scene' || inlineAlertState) {
+    return { blockedByMode: true, ...runtimeWindowState() };
+  }
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
   else mainWindow.maximize();
   return runtimeWindowState();
+}
+
+function toggleMainWindowMaximized() {
+  return enqueueWindowTransition(() => toggleMainWindowMaximizedNow());
 }
 
 function createTray() {
@@ -476,7 +754,8 @@ function createTray() {
   tray.setToolTip('背书自习监督');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开督学场景', click: showSceneWindow },
-    { label: '隐藏到后台', click: hideToBackground },
+    { label: '显示漂浮窗', click: () => hideToBackground('floating') },
+    { label: '完全隐藏', click: () => hideToBackground('hidden') },
     { type: 'separator' },
     { label: '退出程序', click: quitApp },
   ]));
@@ -581,7 +860,9 @@ function registerBreakPromptIpc() {
   }));
   ipcMain.handle('break-prompt:hide', trustedRendererHandler(() => {
     breakPromptState = null;
+    breakPromptSuppressedForAlert = false;
     if (breakPromptWindow && !breakPromptWindow.isDestroyed()) breakPromptWindow.hide();
+    restoreFloatingPositionAfterPrompt();
     return { hidden: true };
   }));
   ipcMain.on('break-prompt:action', (event, action) => {
@@ -618,16 +899,46 @@ app.whenReady().then(async () => {
     );
   });
 
-  ipcMain.handle('hide-to-background', trustedRendererHandler(() => hideToBackground()));
+  ipcMain.handle('background-preference:get', trustedRendererHandler(() => ({
+    backgroundMode: backgroundPreference,
+  })));
+  ipcMain.handle('background-preference:set', trustedRendererHandler((_event, payload) => {
+    const { mode } = validateBackgroundModePayload(payload);
+    const write = backgroundPreferenceWriteChain
+      .catch(() => {})
+      .then(async () => {
+        const saved = await writeBackgroundPreference(windowPreferencePath, mode);
+        backgroundPreference = saved.backgroundMode;
+        return { backgroundMode: backgroundPreference };
+      });
+    backgroundPreferenceWriteChain = write.catch(() => {});
+    return write;
+  }));
+  ipcMain.handle('hide-to-background', trustedRendererHandler((_event, payload) => {
+    const { mode } = validateBackgroundModePayload(payload);
+    return hideToBackground(mode);
+  }));
   ipcMain.handle('window:minimize', trustedRendererHandler(() => minimizeMainWindow()));
   ipcMain.handle('window:toggle-maximize', trustedRendererHandler(() => toggleMainWindowMaximized()));
   ipcMain.handle('restore-scene-mode', trustedRendererHandler(() => showSceneWindow()));
+  ipcMain.handle('force-restore-scene-mode', trustedRendererHandler(() => showSceneWindow({ force: true })));
   ipcMain.handle('reveal-for-inline-alert', trustedRendererHandler(() => revealForInlineAlert()));
   ipcMain.handle('finish-inline-alert', trustedRendererHandler((_event, payload) => finishInlineAlert(payload)));
   ipcMain.handle('get-animation-canvas', trustedRendererHandler(() => ({ ...presentationCanvas, windowMode: mainWindowMode })));
   ipcMain.handle('get-runtime-window-state', trustedRendererHandler(() => runtimeWindowState()));
   ipcMain.handle('get-runtime-cache-state', trustedRendererHandler(() => runtimeCacheState()));
   ipcMain.handle('quit-app', trustedRendererHandler(() => quitApp()));
+  ipcMain.on('window-mode-ready', (event, payload) => {
+    if (!isTrustedRenderer(event)) {
+      console.warn('[window] rejected mode acknowledgement from untrusted renderer');
+      return;
+    }
+    try {
+      completeWindowModeTransition(payload);
+    } catch (error) {
+      console.warn('[window] rejected invalid mode acknowledgement:', error?.message || error);
+    }
+  });
   registerBreakPromptIpc();
 
   speakerService = new SpeakerService({

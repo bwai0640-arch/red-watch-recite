@@ -11,6 +11,10 @@ const UI = {
   windowMinimizeButton: document.querySelector('#window-minimize-button'),
   windowMaximizeButton: document.querySelector('#window-maximize-button'),
   windowCloseButton: document.querySelector('#window-close-button'),
+  floatingVoiceState: document.querySelector('#floating-voice-state'),
+  floatingTimer: document.querySelector('#floating-timer'),
+  floatingHideButton: document.querySelector('#floating-hide-button'),
+  floatingExpandButton: document.querySelector('#floating-expand-button'),
   timer: document.querySelector('#timer'),
   sessionState: document.querySelector('#session-state'),
   voiceState: document.querySelector('#voice-state'),
@@ -30,6 +34,8 @@ const UI = {
   silenceLimitValue: document.querySelector('#silence-limit-value'),
   studyVoiceLimit: document.querySelector('#study-voice-limit-input'),
   studyVoiceLimitValue: document.querySelector('#study-voice-limit-value'),
+  backgroundModeHidden: document.querySelector('#background-mode-hidden'),
+  backgroundModeFloating: document.querySelector('#background-mode-floating'),
   reciteModeButton: document.querySelector('#recite-mode-button'),
   studyModeButton: document.querySelector('#study-mode-button'),
   modeTitle: document.querySelector('#mode-title'),
@@ -181,6 +187,7 @@ const state = {
     studyVoiceSeconds: POLICY.MODE_RULES.study.violationSeconds.default,
     reciteSensitivityDb: 8,
     microphoneDeviceId: '',
+    backgroundMode: 'hidden',
   },
   microphoneDevices: [],
   microphoneRefreshPending: false,
@@ -228,6 +235,7 @@ function loadSettings() {
     state.settings.microphoneDeviceId = typeof stored.microphoneDeviceId === 'string'
       ? stored.microphoneDeviceId.slice(0, 512)
       : '';
+    state.settings.backgroundMode = stored.backgroundMode === 'floating' ? 'floating' : 'hidden';
   } catch {
     // Invalid local preferences fall back to the safe defaults above.
   }
@@ -484,6 +492,45 @@ function setChip(element, text, kind = '') {
     UI.liveVoiceState.textContent = text;
     UI.liveVoiceState.className = `chip ${kind}`.trim();
     UI.liveVoiceDuration.textContent = text;
+    UI.floatingVoiceState.textContent = text;
+    UI.floatingVoiceState.className = `floating-voice-state ${kind}`.trim();
+  }
+}
+
+function updateBackgroundModeUi() {
+  const floating = state.settings.backgroundMode === 'floating';
+  UI.backgroundModeHidden.classList.toggle('active', !floating);
+  UI.backgroundModeFloating.classList.toggle('active', floating);
+  UI.backgroundModeHidden.setAttribute('aria-pressed', String(!floating));
+  UI.backgroundModeFloating.setAttribute('aria-pressed', String(floating));
+  UI.backgroundButton.textContent = floating ? '显示漂浮窗' : '隐藏到后台';
+  const closeLabel = state.active && floating ? '显示漂浮窗' : '隐藏到后台';
+  UI.windowCloseButton.setAttribute('aria-label', closeLabel);
+  UI.windowCloseButton.title = closeLabel;
+}
+
+let backgroundPreferenceMutation = 0;
+
+async function setBackgroundMode(mode) {
+  const normalized = mode === 'floating' ? 'floating' : 'hidden';
+  const mutation = ++backgroundPreferenceMutation;
+  state.settings.backgroundMode = normalized;
+  updateBackgroundModeUi();
+  saveSettings();
+  try {
+    const saved = await window.desktopAPI.setBackgroundPreference(normalized);
+    if (mutation !== backgroundPreferenceMutation) return;
+    state.settings.backgroundMode = saved?.backgroundMode === 'floating' ? 'floating' : 'hidden';
+    saveSettings();
+  } catch (error) {
+    if (mutation === backgroundPreferenceMutation) {
+      const persisted = await window.desktopAPI.getBackgroundPreference().catch(() => null);
+      state.settings.backgroundMode = persisted?.backgroundMode === 'floating' ? 'floating' : 'hidden';
+      saveSettings();
+    }
+    throw error;
+  } finally {
+    if (mutation === backgroundPreferenceMutation) updateBackgroundModeUi();
   }
 }
 
@@ -655,6 +702,7 @@ function updateModeUi() {
   renderMicrophoneUi();
   updateBreakButton();
   updatePreflightUi();
+  updateBackgroundModeUi();
 }
 
 function setMode(mode) {
@@ -1223,6 +1271,8 @@ function pauseSilenceClock() {
   if (!state.silenceArmed || state.silencePausedAt) return;
   state.silencePausedAt = Date.now();
   if (state.mode === 'study') resetStudyAudioRuntime();
+  setChip(UI.voiceState, '检测暂停');
+  UI.voiceStatus.textContent = '检测暂停';
 }
 
 function resumeSilenceClock() {
@@ -1231,6 +1281,8 @@ function resumeSilenceClock() {
   state.silencePausedAt = 0;
   state.quietDetector?.reset();
   if (state.mode === 'study') resetStudyAudioRuntime();
+  setChip(UI.voiceState, '正在恢复检测');
+  UI.voiceStatus.textContent = '正在恢复检测';
 }
 
 function enterStudyingPhase() {
@@ -1667,7 +1719,7 @@ async function startBreak(durationOverrideMs = null) {
       credits: currentBreakCredits(),
       remainingSeconds: remainingRestSeconds(),
     });
-    await window.desktopAPI.hideToBackground();
+    await window.desktopAPI.hideToBackground('hidden');
   } catch (error) {
     addLog(`休息提示显示失败：${error.message}`);
   }
@@ -1722,7 +1774,7 @@ function violationDescription() {
     : `本人连续 ${violationLimitSeconds()} 秒未出声`;
 }
 
-async function finishFatalViolation(plan) {
+async function finishFatalViolation(plan, alertId) {
   state.active = false;
   state.sessionPhase = 'ended';
   state.sessionEnded = true;
@@ -1736,7 +1788,7 @@ async function finishFatalViolation(plan) {
   await cancelRestState();
   await releaseMicrophone();
   hideOverlay();
-  await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+  await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
   setStoppedControls('本次学习结束');
   addLog(`${violationDescription()}（第 ${plan.strike} 次），本次学习结束。`);
 }
@@ -1755,14 +1807,14 @@ async function runPendingViolation() {
   const token = state.sceneToken;
   state.eventBusy = true;
   updateBreakButton();
-  let returnToHidden = false;
+  let alertId = 0;
   let revealed = false;
   let playbackCompleted = false;
   let aborted = false;
   try {
     const revealResult = await window.desktopAPI.revealForInlineAlert();
-    revealed = true;
-    returnToHidden = Boolean(revealResult?.returnToHidden);
+    alertId = Number(revealResult?.alertId) || 0;
+    revealed = alertId > 0;
     if (token !== state.sceneToken || !state.active || state.stopRequested) {
       aborted = true;
     } else {
@@ -1779,26 +1831,34 @@ async function runPendingViolation() {
     state.eventPromise = null;
     updateBreakButton();
   }
-  if (token !== state.sceneToken) return false;
+  if (token !== state.sceneToken) {
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
+    return false;
+  }
   if (aborted || !state.active || state.stopRequested) {
     state.alertOpen = false;
     hideOverlay();
-    if (revealed) await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
     if (state.stopRequested) await finalizeManualStop();
     return false;
   }
-  if (!playbackCompleted) return false;
+  if (!playbackCompleted) {
+    state.alertOpen = false;
+    hideOverlay();
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
+    return false;
+  }
 
   state.lives = Math.max(0, state.lives - 1);
   if (plan.fatal) {
-    await finishFatalViolation(plan);
+    await finishFatalViolation(plan, alertId);
     return true;
   }
 
   state.alertOpen = false;
   hideOverlay();
   if (state.stopRequested) {
-    await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+    await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
     await finalizeManualStop();
     return true;
   }
@@ -1806,9 +1866,7 @@ async function runPendingViolation() {
   state.sessionPhase = 'studying';
   if (state.active) state.studyClock.resume();
   armSilenceClock();
-  await window.desktopAPI.finishInlineAlert({
-    returnToHidden: returnToHidden && state.active,
-  });
+  await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'return' });
   scheduleNextPatrol();
   showEarnedBreakPrompt().catch(handleAuxiliaryUiError);
   return true;
@@ -1954,14 +2012,15 @@ async function previewSelectedClip() {
     UI.previewClipButton.disabled = true;
     UI.startButton.disabled = true;
     const token = ++state.sceneToken;
-    const presentation = { kind: 'preview', token, clip };
+    const presentation = { kind: 'preview', token, clip, alertId: 0 };
     state.presentation = presentation;
     state.previewPending = false;
     updateModeUi();
     updateSpeakerProfileUi();
     updatePreflightUi();
     showOverlay({ title: '动画预览', message: `${clip.code}｜${clip.name}`, controls: true, preview: true });
-    await window.desktopAPI.revealForInlineAlert();
+    const revealResult = await window.desktopAPI.revealForInlineAlert();
+    presentation.alertId = Number(revealResult?.alertId) || 0;
     const prepared = await prepareClip(clip.id, true);
     if (state.presentation !== presentation || token !== state.sceneToken) return;
     state.trace.push({ at: Date.now(), clipId: clip.id, phase: 'preview', kind: 'preview', fatal: false, strike: 0 });
@@ -1985,7 +2044,11 @@ async function finishPreview() {
   await state.scenePlayer.stop();
   hideOverlay();
   await showIdleScene().catch(() => {});
-  await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+  if (presentation.alertId > 0) {
+    await window.desktopAPI.finishInlineAlert({ alertId: presentation.alertId, disposition: 'scene' });
+  } else {
+    await window.desktopAPI.restoreSceneMode();
+  }
   updateModeUi();
   updateSpeakerProfileUi();
   updatePreflightUi('可继续测试当前检测设置。');
@@ -1993,9 +2056,12 @@ async function finishPreview() {
 
 function startElapsedTimer() {
   UI.timer.textContent = '00:00';
+  UI.floatingTimer.textContent = '已学习 00:00';
   stopElapsedTimer();
   state.elapsedTimer = window.setInterval(() => {
-    UI.timer.textContent = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    UI.timer.textContent = elapsed;
+    UI.floatingTimer.textContent = `已学习 ${elapsed}`;
     settleStudyMilestones();
   }, 1000);
 }
@@ -2617,8 +2683,8 @@ async function startSession() {
 function applyWindowMode(mode) {
   state.windowMode = mode;
   document.body.dataset.windowMode = mode;
-  if (mode === 'hidden' && (state.preflightTesting || state.preflightStarting)) {
-    stopPreflightTest({ status: '窗口已隐藏，测试已停止。' }).catch(handleAuxiliaryUiError);
+  if ((mode === 'hidden' || mode === 'floating') && (state.preflightTesting || state.preflightStarting)) {
+    stopPreflightTest({ status: '窗口已转入后台，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
 }
 
@@ -2634,10 +2700,15 @@ async function toggleWindowMaximize() {
   setWindowMaximizedControl(runtime?.maximized);
 }
 
-async function hideWindowFromChrome() {
-  await stopPreflightTest({ status: '窗口已隐藏，测试已停止。' });
-  addLog('隐藏到后台。');
-  await window.desktopAPI.hideToBackground();
+async function hideWindowFromChrome(forceMode = null) {
+  await stopPreflightTest({ status: '窗口已转入后台，测试已停止。' });
+  const requestedMode = forceMode || (
+    state.active && state.sessionPhase !== 'resting'
+      ? state.settings.backgroundMode
+      : 'hidden'
+  );
+  addLog(requestedMode === 'floating' ? '显示漂浮窗。' : '完全隐藏到后台。');
+  await window.desktopAPI.hideToBackground(requestedMode);
 }
 
 function handleSceneError(error) {
@@ -2682,17 +2753,9 @@ async function resetSessionAfterFlowFailure(flowError) {
     hideOverlay();
     await window.desktop.hideBreakPrompt().catch(handleAuxiliaryUiError);
 
-    let mainWindowRestored = false;
-    await window.desktopAPI.finishInlineAlert({ returnToHidden: false }).then(() => {
-      mainWindowRestored = true;
-    }).catch((error) => {
-      console.error('异常流程中结束提醒窗口模式失败：', error);
+    await window.desktopAPI.forceRestoreSceneMode().catch((error) => {
+      console.error('异常流程中恢复主窗口失败：', error);
     });
-    if (!mainWindowRestored) {
-      await window.desktopAPI.restoreSceneMode().catch((error) => {
-        console.error('异常流程中恢复主窗口失败：', error);
-      });
-    }
     await showIdleScene().catch((error) => {
       console.error('异常流程中恢复待命画面失败：', error);
     });
@@ -2726,9 +2789,7 @@ function handleSessionFlowError(error, { voiceMessage = '' } = {}) {
     state.sessionFailureCleanupPending = false;
     hideOverlay();
     window.desktop.hideBreakPrompt().catch(handleAuxiliaryUiError);
-    window.desktopAPI.finishInlineAlert({ returnToHidden: false }).catch(() => (
-      window.desktopAPI.restoreSceneMode().catch(() => {})
-    ));
+    window.desktopAPI.forceRestoreSceneMode().catch(() => {});
     setStoppedControls('待命');
     UI.sceneStatus.hidden = false;
     UI.sceneStatus.textContent = `学习已安全停止：${error.message}`;
@@ -2743,6 +2804,27 @@ UI.reciteModeButton.addEventListener('click', () => setMode('recite'));
 UI.studyModeButton.addEventListener('click', () => setMode('study'));
 UI.backgroundButton.addEventListener('click', async () => {
   await hideWindowFromChrome();
+});
+UI.backgroundModeHidden.addEventListener('click', () => {
+  setBackgroundMode('hidden').catch(handleAuxiliaryUiError);
+});
+UI.backgroundModeFloating.addEventListener('click', () => {
+  setBackgroundMode('floating').catch(handleAuxiliaryUiError);
+});
+UI.floatingHideButton.addEventListener('click', () => {
+  hideWindowFromChrome('hidden').catch(handleAuxiliaryUiError);
+});
+UI.floatingExpandButton.addEventListener('click', () => {
+  window.desktopAPI.restoreSceneMode().catch(handleAuxiliaryUiError);
+});
+UI.floatingVoiceState.parentElement.addEventListener('dblclick', (event) => {
+  if (event.target.closest('.floating-action')) return;
+  window.desktopAPI.restoreSceneMode().catch(handleAuxiliaryUiError);
+});
+UI.sceneCanvas.addEventListener('dblclick', () => {
+  if (state.windowMode === 'floating') {
+    window.desktopAPI.restoreSceneMode().catch(handleAuxiliaryUiError);
+  }
 });
 UI.windowMinimizeButton.addEventListener('click', () => {
   window.desktopAPI.minimizeWindow().catch(handleAuxiliaryUiError);
@@ -2825,13 +2907,34 @@ window.addEventListener('keydown', (event) => {
     closeSpeakerEnrollment({ cancel: true });
   }
 });
-window.desktopAPI.onWindowModeChanged(({ mode, minimized = false }) => {
+window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId = 0 }) => {
   applyWindowMode(mode);
+  if (Number.isSafeInteger(transitionId) && transitionId > 0) {
+    let acknowledged = false;
+    const acknowledge = () => {
+      if (acknowledged) return;
+      acknowledged = true;
+      window.desktopAPI.acknowledgeWindowMode({ transitionId, mode });
+    };
+    const fallback = window.setTimeout(() => {
+      void document.body.offsetWidth;
+      acknowledge();
+    }, 80);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.clearTimeout(fallback);
+        acknowledge();
+      });
+    });
+  }
   if (minimized && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已最小化，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
 });
 window.desktopAPI.onWindowMaximizedChanged(({ maximized }) => setWindowMaximizedControl(maximized));
+window.desktopAPI.onWindowCloseRequested(() => {
+  hideWindowFromChrome().catch(handleAuxiliaryUiError);
+});
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
     if (!microphoneSelectionLocked()) refreshMicrophones().catch(() => {});
@@ -2891,6 +2994,8 @@ window.__beishuTest = Object.freeze({
       reciteSilenceSeconds: state.settings.reciteSilenceSeconds,
       studyVoiceSeconds: state.settings.studyVoiceSeconds,
       reciteSensitivityDb: state.settings.reciteSensitivityDb,
+      backgroundMode: state.settings.backgroundMode,
+      floatingTimer: UI.floatingTimer.textContent,
       studyUsesDirectClassification: true,
       latestNoiseFloorDb: state.latestNoiseFloorDb,
       quietDetector: state.quietDetector?.snapshot() || null,
@@ -2939,7 +3044,9 @@ window.__beishuTest = Object.freeze({
     state.studyClock = new POLICY.EffectiveStudyClock({ elapsedMs });
     if (state.sessionPhase === 'studying') state.studyClock.resume();
     settleStudyMilestones();
-    UI.timer.textContent = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    UI.timer.textContent = elapsed;
+    UI.floatingTimer.textContent = `已学习 ${elapsed}`;
     return effectiveElapsedMs();
   },
   startBreak(durationMs = 1_000) {
@@ -2958,6 +3065,13 @@ window.__beishuTest = Object.freeze({
 
 async function initialize() {
   loadSettings();
+  const backgroundPreference = await window.desktopAPI.getBackgroundPreference().catch(() => null);
+  if (backgroundPreference) {
+    state.settings.backgroundMode = backgroundPreference.backgroundMode === 'floating'
+      ? 'floating'
+      : 'hidden';
+    saveSettings();
+  }
   await refreshMicrophones().catch(() => {});
   updateModeUi();
   state.scenePlayer = new DisciplineMediaPlayer(UI.sceneCanvas, { statusElement: UI.sceneStatus });
@@ -2966,6 +3080,7 @@ async function initialize() {
   await Promise.all([refreshSpeakerState(), refreshAudioEventState()]);
   const runtime = await window.desktopAPI.getRuntimeWindowState().catch(() => null);
   setWindowMaximizedControl(runtime?.maximized);
+  if (runtime?.mode) applyWindowMode(runtime.mode);
   updateModeUi();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
     setChip(UI.voiceState, '需要录入本人声纹');

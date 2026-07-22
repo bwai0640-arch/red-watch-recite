@@ -492,12 +492,12 @@ try {
     let invalidPayloadRejected = false;
     let extraFieldRejected = false;
     try {
-      await window.desktopAPI.finishInlineAlert({ returnToHidden: 'false' });
+      await window.desktopAPI.finishInlineAlert({ alertId: '1', disposition: 'return' });
     } catch {
       invalidPayloadRejected = true;
     }
     try {
-      await window.desktopAPI.finishInlineAlert({ returnToHidden: false, extra: true });
+      await window.desktopAPI.finishInlineAlert({ alertId: 1, disposition: 'return', extra: true });
     } catch {
       extraFieldRejected = true;
     }
@@ -510,6 +510,111 @@ try {
   assert(report.ipcBoundary.invalidPayloadRejected && report.ipcBoundary.extraFieldRejected,
     `Invalid finish-inline-alert payload was accepted: ${JSON.stringify(report.ipcBoundary)}`);
   assert(report.ipcBoundary.popupBlocked, 'Main renderer was allowed to create a new window');
+
+  report.floatingShell = await main.evaluate(`(async () => {
+    const before = await window.desktopAPI.getRuntimeWindowState();
+    await window.desktopAPI.hideToBackground('floating');
+    const statusbar = document.querySelector('#floating-statusbar');
+    const canvas = document.querySelector('#study-scene-canvas');
+    const canvasRect = canvas.getBoundingClientRect();
+    const statusRect = statusbar.getBoundingClientRect();
+    return {
+      before,
+      runtime: await window.desktopAPI.getRuntimeWindowState(),
+      statusbarVisible: statusbar.getClientRects().length > 0,
+      shellVisible: document.querySelector('.shell').getClientRects().length > 0,
+      titlebarVisible: document.querySelector('#window-titlebar').getClientRects().length > 0,
+      liveMeterVisible: document.querySelector('#live-meter').getClientRects().length > 0,
+      panelMeterVisible: document.querySelector('.meter-wrap .meter').getClientRects().length > 0,
+      hoverToolsOpacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+      canvasAspect: canvasRect.width / canvasRect.height,
+      canvasIdentityStable: canvas === document.querySelector('#study-scene-canvas'),
+      hoverPoint: { x: statusRect.left + statusRect.width / 2, y: statusRect.top + statusRect.height / 2 },
+    };
+  })()`);
+  assert(report.floatingShell.runtime.mode === 'floating'
+    && report.floatingShell.runtime.visible
+    && report.floatingShell.runtime.alwaysOnTop
+    && report.floatingShell.runtime.skipTaskbar
+    && !report.floatingShell.runtime.resizable,
+  `Floating native window contract failed: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.runtime.windowCount === 1
+    && report.floatingShell.runtime.webContentsId === mainWebContentsId
+    && report.floatingShell.canvasIdentityStable,
+  `Floating mode created or replaced the main renderer: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.statusbarVisible
+    && !report.floatingShell.shellVisible
+    && !report.floatingShell.titlebarVisible
+    && !report.floatingShell.liveMeterVisible
+    && !report.floatingShell.panelMeterVisible
+    && report.floatingShell.hoverToolsOpacity === '0',
+  `Floating mode exposed extra UI: ${JSON.stringify(report.floatingShell)}`);
+  assert(Math.abs(report.floatingShell.canvasAspect - (16 / 9)) < 0.03,
+    `Floating canvas is not 16:9: ${JSON.stringify(report.floatingShell)}`);
+
+  await main.send('Input.dispatchMouseEvent', {
+    type: 'mouseMoved',
+    x: report.floatingShell.hoverPoint.x,
+    y: report.floatingShell.hoverPoint.y,
+  });
+  await wait(200);
+  report.floatingHover = await main.evaluate(`(() => ({
+    opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+    timer: document.querySelector('#floating-timer').textContent.trim(),
+    hideVisible: document.querySelector('#floating-hide-button').getClientRects().length > 0,
+    expandVisible: document.querySelector('#floating-expand-button').getClientRects().length > 0,
+  }))()`);
+  assert(report.floatingHover.opacity === '1'
+    && /^已学习 \\d{2}:\\d{2}(?::\\d{2})?$/.test(report.floatingHover.timer)
+    && report.floatingHover.hideVisible
+    && report.floatingHover.expandVisible,
+  `Floating hover tools or elapsed timer are unavailable: ${JSON.stringify(report.floatingHover)}`);
+
+  report.floatingAlertReturn = await main.evaluate(`(async () => {
+    const revealed = await window.desktopAPI.revealForInlineAlert();
+    const alert = await window.desktopAPI.getRuntimeWindowState();
+    const returned = await window.desktopAPI.finishInlineAlert({
+      alertId: revealed.alertId,
+      disposition: 'return',
+    });
+    return { revealed, alert, returned };
+  })()`);
+  assert(report.floatingAlertReturn.revealed.returnMode === 'floating'
+    && report.floatingAlertReturn.alert.mode === 'alert'
+    && report.floatingAlertReturn.returned.mode === 'floating'
+    && report.floatingAlertReturn.returned.alwaysOnTop
+    && report.floatingAlertReturn.returned.skipTaskbar
+    && !report.floatingAlertReturn.returned.resizable
+    && !report.floatingAlertReturn.returned.minimizable
+    && !report.floatingAlertReturn.returned.maximizable,
+  `Floating alert did not return to the same compact contract: ${JSON.stringify(report.floatingAlertReturn)}`);
+
+  await main.evaluate(`document.querySelector('#floating-expand-button').click()`);
+  report.floatingShell.restored = await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'scene',
+  );
+  assert(report.floatingShell.restored.minimumSize?.width === 960
+    && report.floatingShell.restored.minimumSize?.height === 540
+    && report.floatingShell.restored.resizable
+    && report.floatingShell.restored.minimizable
+    && report.floatingShell.restored.maximizable,
+  `Floating expand did not restore the scene contract: ${JSON.stringify(report.floatingShell)}`);
+
+  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
+  await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'floating',
+  );
+  await main.evaluate(`document.querySelector('#floating-hide-button').click()`);
+  report.floatingHidden = await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'hidden' && !state.visible,
+  );
+  await main.evaluate(`window.desktopAPI.restoreSceneMode()`);
 
   report.windowChrome = await main.evaluate(`(() => {
     const titlebar = document.querySelector('#window-titlebar');

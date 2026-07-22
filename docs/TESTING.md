@@ -6,7 +6,7 @@
 - UI/CDP 测试必须使用隔离的数据目录和独立调试端口。
 - `speaker-ui-test.mjs` 与 `adversarial-ui-test.mjs` 会调用 `deleteSpeakerProfile()` 并退出被测应用，绝不能连接真实用户正在使用的安装版。
 - 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。
-- 1.11.1 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
+- 1.12.0 本轮继续只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
 
 ## Node 路径
 
@@ -33,6 +33,7 @@ cd D:\RedWatchRecite
 & $node --check renderer\app.js
 & $node --check main.js
 & $node --check preload.js
+& $node --check window-mode-policy.js
 & $node --check break-prompt-preload.js
 & $node --check audio-event-service.js
 & $node --check audio-event-worker.js
@@ -45,6 +46,8 @@ cd D:\RedWatchRecite
 & $node scripts\speaker-audio-test.cjs
 & $node scripts\speaker-model-test.cjs
 & $node scripts\speaker-service-test.cjs
+& $node scripts\window-mode-policy-test.cjs
+& $node scripts\floating-window-source-test.cjs
 ```
 
 覆盖范围：
@@ -60,10 +63,25 @@ cd D:\RedWatchRecite
 | `speaker-model-test.cjs` | 打印 3 个身份 fixture 的相似度矩阵；该脚本没有完整阈值断言 |
 | `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed |
 | `profile-crypto-test.cjs` | 当前 Windows 用户 DPAPI 的加密、非明文保存与跨独立子进程解密；不读写用户声纹档案 |
+| `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、休息提示避让，以及隔离临时目录中的偏好原子覆盖与损坏回退 |
+| `floating-window-source-test.cjs` | 漂浮模式复用主窗口、最小 preload 白名单、只含结果/动画/悬停计时与操作、同 Canvas 16:9 和提醒原状态返回的源码门禁 |
+| `release-package-static-test.cjs <candidate-root>` | 不运行 EXE，直接核对候选 `app.asar` 的版本、核心源码哈希、22 段动画/22 份源音轨、模型/原生依赖和用户数据排除项 |
 
 `speaker-service-test.cjs` 只使用并清理 `work/speaker-service-test-data`。若修改该路径，必须重新确认不会指向用户数据。
 
-### 1.11.1 本轮后台结果
+### 1.12.0 本轮后台结果
+
+2026-07-22 已完成且通过以下不触碰桌面的门禁：
+
+- `main.js`、`preload.js`、`renderer/app.js`、`window-mode-policy.js` 语法检查；
+- `window-mode-policy-test.cjs` 与 `floating-window-source-test.cjs`；
+- 隔离构建 1.12.0 安装版和便携版，文件版本、大小、SHA-256 与 `NotSigned` 状态核对；
+- `release-package-static-test.cjs`：`app.asar` 354 项、unpacked 31 个文件、22 段动画、22 份源音轨、6 个核心源码哈希一致、禁止项 0；
+- 漂浮偏好测试只写入系统临时目录，结束后删除；不读取或改写用户声纹、正式偏好、麦克风或音频。
+
+`mode-rest-ui-test.mjs` 已补充同 `webContents` 漂浮窗口、320×225 布局、无音量条、16:9 Canvas、真实鼠标悬停后的“已学习”计时/两个操作、漂浮→提醒→漂浮返回、隐藏与放大，以及全部原生窗口能力恢复断言；按用户要求没有运行，避免窗口抢占桌面。
+
+### 1.11.1 后台结果
 
 2026-07-21 已完成且通过以下不触碰桌面的门禁：
 
@@ -78,7 +96,7 @@ cd D:\RedWatchRecite
 
 ### CED Mini 发布候选正样本门禁
 
-不带 fixture 运行 `audio-event-model-smoke.cjs` 只能证明模型可加载、静音不误报、合成键盘不误报，不能证明真实媒体在响键盘下仍能识别。发布 1.11.1 候选前必须额外运行一次强制正样本门禁：
+不带 fixture 运行 `audio-event-model-smoke.cjs` 只能证明模型可加载、静音不误报、合成键盘不误报，不能证明真实媒体在响键盘下仍能识别。发布当前候选前必须额外运行一次强制正样本门禁：
 
 ```powershell
 $env:BEISHU_AUDIO_EVENT_FIXTURES = '<临时解压的 sherpa-onnx 官方 audio-tagging test_wavs 目录>'
@@ -94,7 +112,7 @@ Remove-Item Env:BEISHU_AUDIO_EVENT_FIXTURES, Env:BEISHU_KEYBOARD_FIXTURES, Env:B
 
 ## 隔离启动开发版
 
-本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.11.1 明确跳过本节及后续全部 UI/CDP 脚本。
+本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.12.0 明确跳过本节及后续全部 UI/CDP 脚本。
 
 为每个 UI 测试创建新的数据目录和端口：
 
