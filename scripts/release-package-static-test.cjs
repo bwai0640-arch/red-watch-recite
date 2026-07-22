@@ -40,6 +40,7 @@ const requiredEntries = [
   'main.js',
   'preload.js',
   'window-mode-policy.js',
+  'study-settings-policy.js',
   'renderer/app.js',
   'renderer/index.html',
   'renderer/styles.css',
@@ -57,6 +58,7 @@ for (const entry of requiredEntries) {
 const prohibitedPatterns = [
   /(^|\/)speaker-profile\.dat(?:\.|$)/i,
   /(^|\/)window-preferences\.json$/i,
+  /(^|\/)study-preferences\.json$/i,
   /(^|\/)RedWatchReciteData(\/|$)/i,
   /(^|\/)work(\/|$)/i,
   /(^|\/)release-staging(\/|$)/i,
@@ -78,8 +80,21 @@ const exactSourceFiles = [
   'main.js',
   'preload.js',
   'window-mode-policy.js',
+  'study-settings-policy.js',
+  'cache-cleanup.js',
+  'profile-crypto.js',
+  'break-prompt-preload.js',
+  'speaker-service.js',
+  'speaker-worker.js',
+  'audio-event-service.js',
+  'audio-event-worker.js',
+  'renderer/adaptive-vad.js',
   'renderer/app.js',
   'renderer/index.html',
+  'renderer/media-player.js',
+  'renderer/scene-rules.js',
+  'renderer/speaker-audio.js',
+  'renderer/study-policy.js',
   'renderer/styles.css',
 ];
 for (const relativePath of exactSourceFiles) {
@@ -89,8 +104,22 @@ for (const relativePath of exactSourceFiles) {
 }
 
 const packedPackage = JSON.parse(extract('package.json').toString('utf8'));
-assert.equal(packedPackage.version, '1.12.0');
+const sourcePackage = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
+assert.equal(packedPackage.version, sourcePackage.version);
 assert.equal(packedPackage.name, 'red-watch-recite');
+assert.equal(sourcePackage.build.appId, 'top.redwatch.study-supervisor');
+assert.equal(sourcePackage.build.productName, '凛冬督学局');
+assert.equal(sourcePackage.build.win.artifactName, '凛冬督学局-安装版-${version}.exe');
+assert.equal(sourcePackage.build.nsis.shortcutName, '凛冬督学局');
+
+const expectedArtifacts = [
+  path.join(candidateRoot, `凛冬督学局-安装版-${sourcePackage.version}.exe`),
+  path.join(candidateRoot, `凛冬督学局-便携版-${sourcePackage.version}.exe`),
+  path.join(candidateRoot, 'win-unpacked', '凛冬督学局.exe'),
+];
+for (const artifact of expectedArtifacts) {
+  assert.ok(fs.existsSync(artifact), `Missing renamed release artifact: ${artifact}`);
+}
 
 const catalog = JSON.parse(extract('renderer', 'media', 'catalog.json').toString('utf8'));
 assert.equal(catalog.length, 22, 'The package must contain all 22 catalog animations.');

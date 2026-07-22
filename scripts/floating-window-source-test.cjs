@@ -9,8 +9,10 @@ const mainSource = read('main.js');
 const preloadSource = read('preload.js');
 const appSource = read('renderer/app.js');
 const htmlSource = read('renderer/index.html');
+const breakPromptHtmlSource = read('renderer/break-prompt.html');
 const cssSource = read('renderer/styles.css');
 const packageSource = read('package.json');
+const packageConfig = JSON.parse(packageSource);
 
 function section(source, start, end) {
   const startIndex = source.indexOf(start);
@@ -35,6 +37,30 @@ assert.equal(
   'only the main window and the existing break prompt may create BrowserWindows',
 );
 
+assertOrdered(
+  mainSource,
+  [
+    "app.setName('凛冬督学局')",
+    'const persistentDataRoot = process.env.SUPERVISION_DATA_DIR',
+    "path.join(app.getPath('appData'), '背书自习监督')",
+    "app.setPath('userData', persistentDataRoot)",
+    "app.setPath('sessionData', transientSessionDataRoot)",
+  ],
+  'visible rename must preserve the legacy userData directory before creating the runtime session',
+);
+assert.match(mainSource, /title: '凛冬督学局'/);
+assert.match(mainSource, /title: '凛冬督学局 · 休息券'/);
+assert.match(mainSource, /tray\.setToolTip\('凛冬督学局'\)/);
+assert.match(htmlSource, /<title>凛冬督学局<\/title>/);
+assert.match(htmlSource, /<div class="window-title">凛冬督学局<\/div>/);
+assert.match(htmlSource, /<h1>凛冬督学局 <span id="mode-title">/);
+assert.match(breakPromptHtmlSource, /<title>凛冬督学局 · 休息券<\/title>/);
+assert.match(breakPromptHtmlSource, /<span class="eyebrow">凛冬督学局<\/span>/);
+assert.equal(packageConfig.build.appId, 'top.redwatch.study-supervisor');
+assert.equal(packageConfig.build.productName, '凛冬督学局');
+assert.equal(packageConfig.build.win.artifactName, '凛冬督学局-安装版-${version}.exe');
+assert.equal(packageConfig.build.nsis.shortcutName, '凛冬督学局');
+
 const floatingFunction = section(
   mainSource,
   'async function showFloatingWindowNow()',
@@ -43,7 +69,8 @@ const floatingFunction = section(
 assert.match(floatingFunction, /mainWindowMode = 'floating'/);
 assert.match(floatingFunction, /setAlwaysOnTop\(true, 'floating'\)/);
 assert.match(floatingFunction, /setMainWindowSkipTaskbar\(true\)/);
-assert.match(floatingFunction, /setResizable\(false\)/);
+assert.match(floatingFunction, /setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)/);
+assert.match(floatingFunction, /setResizable\(true\)/);
 assert.doesNotMatch(floatingFunction, /new BrowserWindow/);
 const floatingTransition = floatingFunction.slice(floatingFunction.indexOf('mainWindow.hide()'));
 assertOrdered(
@@ -121,6 +148,13 @@ assert.match(mainSource, /ipcMain\.on\('window-mode-ready'/);
 assert.match(mainSource, /ipcMain\.handle\('force-restore-scene-mode'/);
 assert.match(mainSource, /contents\.send\('window-close-requested'\)/);
 assert.match(mainSource, /mainWindow\.on\('will-move'/);
+assert.match(mainSource, /mainWindow\.on\('will-resize'/);
+assert.match(mainSource, /mainWindow\.on\('resize'/);
+assert.match(mainSource, /mainWindow\.on\('resized'/);
+assert.match(mainSource, /persistFloatingWindowSize/);
+assert.match(mainSource, /readFloatingWindowSize/);
+assert.match(mainSource, /writeFloatingWindowSize/);
+assert.match(mainSource, /floatingWindowMinimumSize = Object\.freeze\(\{ width: 224, height: 170 \}\)/);
 assert.doesNotMatch(mainSource, /suppressFloatingBoundsCapture|setImmediate\(.*Floating/);
 
 assert.match(preloadSource, /hideToBackground: \(mode\).*\{ mode \}/);
@@ -136,12 +170,34 @@ assert.match(floatingMarkup, /id="floating-timer"/);
 assert.match(floatingMarkup, /id="floating-hide-button"/);
 assert.match(floatingMarkup, /id="floating-expand-button"/);
 assert.doesNotMatch(floatingMarkup, /meter|volume|threshold/i);
+assert.doesNotMatch(htmlSource, /floating-threshold|voice-threshold|volume-threshold/);
+assert.doesNotMatch(appSource, /floatingVoiceThreshold|voiceThreshold|thresholdMarker/);
+assert.doesNotMatch(cssSource, /\.floating-threshold-control|\.threshold-marker/);
+
+assert.match(htmlSource, /id="background-action" class="background-action"/);
+assert.match(htmlSource, /id="background-button"[\s\S]*?aria-controls="background-action-menu"[\s\S]*?aria-expanded="false"/);
+assert.match(htmlSource, /id="background-action-menu"[\s\S]*?role="group"[\s\S]*?aria-hidden="true"/);
+assert.match(htmlSource, /id="background-choice-hidden"[\s\S]*?>完全隐藏<\/button>/);
+assert.match(htmlSource, /id="background-choice-floating"[\s\S]*?>使用漂浮窗<\/button>/);
 
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.shell/);
 assert.match(cssSource, /body\[data-window-mode="floating"\]:hover \.floating-hover-tools/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas/);
 assert.match(cssSource, /aspect-ratio: 16 \/ 9/);
 assert.match(cssSource, /\.floating-timer[^}]*white-space: nowrap/);
+assert.match(cssSource, /\.floating-timer[^}]*min-width: 0[^}]*text-overflow: ellipsis/);
+assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*-webkit-app-region: drag/);
+assert.match(cssSource, /\.floating-action\s*\{[^}]*-webkit-app-region: no-drag/);
+assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene\s*\{[^}]*-webkit-app-region: drag/);
+assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas\s*\{[^}]*-webkit-app-region: drag/);
+assert.match(cssSource, /\.background-action-menu\s*\{[^}]*top: calc\(100% - 1px\)[^}]*bottom: auto[^}]*grid-template-columns: minmax\(0, 1fr\)/);
+assert.match(cssSource, /\.actions\s*\{[^}]*align-items: start/);
+assert.match(cssSource, /body\.scene-mode:not\(\.controls-open\) \.background-action\.menu-open \.background-action-menu\s*\{[^}]*position: static[^}]*margin-top: 4px[^}]*transform: none/);
+assert.doesNotMatch(cssSource, /body\.scene-mode:not\(\.controls-open\) \.background-action-menu\s*\{[^}]*bottom: calc\(100% - 1px\)/);
+assert.doesNotMatch(cssSource, /\.background-action:hover \.background-action-menu/);
+assert.doesNotMatch(cssSource, /\.background-action:focus-within \.background-action-menu/);
+assert.match(cssSource, /\.background-action\.menu-open \.background-action-menu/);
+assert.match(cssSource, /#background-button:disabled \+ \.background-action-menu\s*\{ display: none; \}/);
 
 assert.match(appSource, /UI\.floatingVoiceState\.textContent = text/);
 assert.match(appSource, /UI\.floatingTimer\.textContent = `已学习 \$\{elapsed\}`/);
@@ -152,6 +208,24 @@ assert.match(appSource, /acknowledgeWindowMode\(\{ transitionId, mode \}\)/);
 assert.match(appSource, /forceRestoreSceneMode\(\)/);
 assert.match(appSource, /onWindowCloseRequested/);
 assert.match(appSource, /backgroundPreferenceMutation/);
+assert.match(appSource, /function chooseBackgroundModeAndHide\(mode\)[\s\S]*setBackgroundMode\(mode\)[\s\S]*hideWindowFromChrome\(mode\)/);
+assert.match(appSource, /backgroundChoiceHidden\.addEventListener\('click'[\s\S]*chooseBackgroundModeAndHide\('hidden'\)/);
+assert.match(appSource, /backgroundChoiceFloating\.addEventListener\('click'[\s\S]*chooseBackgroundModeAndHide\('floating'\)/);
+assert.match(appSource, /backgroundAction\.addEventListener\('pointerenter'/);
+assert.match(appSource, /backgroundAction\.addEventListener\('focusin'/);
+assert.match(appSource, /state\.sessionPhase === 'resting' \? 'hidden'/);
+assert.match(appSource, /const STUDY_RECOVERY_CONFIRM_SECONDS = 5/);
+assert.match(appSource, /rearmQuietSeconds: STUDY_RECOVERY_CONFIRM_SECONDS/);
+assert.match(appSource, /evidenceGapSeconds: STUDY_RECOVERY_CONFIRM_SECONDS/);
+assert.match(appSource, /function showAnimationWatchState\(\)[\s\S]*好好学！盯着你呢！[\s\S]*setChip\(UI\.voiceState, label, 'watch'\)/);
+assert.doesNotMatch(appSource, /检测暂停|正在恢复检测|动画预览期间暂停测试/);
+assert.doesNotMatch(appSource, /floatingVoiceState\.parentElement\.addEventListener\('dblclick'/);
+assert.match(cssSource, /\.chip\.watch\s*\{[^}]*color: #f0bd5d/);
+assert.match(cssSource, /\.floating-voice-state\.watch\s*\{ color: #f0bd5d; \}/);
+assert.match(cssSource, /\.watch-copy\s*\{ color: #f0bd5d !important; \}/);
+assert.match(appSource, /liveVoiceDuration\.classList\.toggle\('watch-copy', watchPresentation\)/);
+assert.match(appSource, /voiceStatus\.classList\.toggle\('watch-copy', watchPresentation\)/);
+assert.match(appSource, /preflightTestStatus\.classList\.toggle\('watch-copy', text === '好好学！盯着你呢！'\)/);
 assert.doesNotMatch(appSource, /returnToHidden/);
 
 assert.match(packageSource, /"window-mode-policy\.js"/);

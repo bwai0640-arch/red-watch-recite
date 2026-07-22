@@ -6,12 +6,15 @@ const path = require('node:path');
 const {
   clampFloatingBounds,
   floatingWindowBounds,
+  normalizeFloatingWindowSize,
   readBackgroundPreference,
+  readFloatingWindowSize,
   resolveAlertReturnMode,
   validateBackgroundModePayload,
   validateFinishAlertPayload,
   validateWindowModeReadyPayload,
   writeBackgroundPreference,
+  writeFloatingWindowSize,
 } = require('../window-mode-policy');
 
 function overlaps(first, second) {
@@ -87,6 +90,27 @@ async function main() {
     { x: 0, y: 0, width: 320, height: 225 },
     'zero is a valid saved coordinate and must not be treated as missing',
   );
+  assert.deepEqual(
+    clampFloatingBounds(
+      { x: 1910, y: 1030, width: 260, height: 190 },
+      workArea,
+      { width: 320, height: 225 },
+      { width: 224, height: 170 },
+    ),
+    { x: 1660, y: 850, width: 260, height: 190 },
+    'resized floating bounds preserve their valid size and remain on screen',
+  );
+  assert.deepEqual(
+    normalizeFloatingWindowSize(
+      { width: 120, height: 900 },
+      {
+        defaultSize: { width: 320, height: 225 },
+        minimumSize: { width: 224, height: 170 },
+        maximumSize: { width: 320, height: 225 },
+      },
+    ),
+    { width: 224, height: 225 },
+  );
 
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'rwt-window-mode-'));
   const preferencePath = path.join(temporaryRoot, 'window-preferences.json');
@@ -94,10 +118,37 @@ async function main() {
     assert.equal(readBackgroundPreference(preferencePath), 'hidden');
     await writeBackgroundPreference(preferencePath, 'floating');
     assert.equal(readBackgroundPreference(preferencePath), 'floating');
+    await writeFloatingWindowSize(preferencePath, { width: 260, height: 190 });
+    assert.deepEqual(
+      readFloatingWindowSize(preferencePath, {
+        defaultSize: { width: 320, height: 225 },
+        minimumSize: { width: 224, height: 170 },
+        maximumSize: { width: 320, height: 225 },
+      }),
+      { width: 260, height: 190 },
+    );
     await writeBackgroundPreference(preferencePath, 'hidden');
     assert.equal(readBackgroundPreference(preferencePath), 'hidden');
+    assert.deepEqual(
+      readFloatingWindowSize(preferencePath, {
+        defaultSize: { width: 320, height: 225 },
+        minimumSize: { width: 224, height: 170 },
+        maximumSize: { width: 320, height: 225 },
+      }),
+      { width: 260, height: 190 },
+      'changing the background mode must preserve the saved floating size',
+    );
     fs.writeFileSync(preferencePath, '{bad json', 'utf8');
     assert.equal(readBackgroundPreference(preferencePath), 'hidden');
+    assert.deepEqual(
+      readFloatingWindowSize(preferencePath, {
+        defaultSize: { width: 320, height: 225 },
+        minimumSize: { width: 224, height: 170 },
+        maximumSize: { width: 320, height: 225 },
+      }),
+      { width: 320, height: 225 },
+      'corrupt preferences must fall back to the current maximum/default size',
+    );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

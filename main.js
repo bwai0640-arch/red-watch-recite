@@ -20,12 +20,19 @@ const {
   clampFloatingBounds,
   floatingWindowBounds,
   readBackgroundPreference,
+  readFloatingWindowSize,
   resolveAlertReturnMode,
   validateBackgroundModePayload,
   validateFinishAlertPayload,
   validateWindowModeReadyPayload,
   writeBackgroundPreference,
+  writeFloatingWindowSize,
 } = require('./window-mode-policy');
+const {
+  readStudySettings,
+  validateStudySettingsPayload,
+  writeStudySettings,
+} = require('./study-settings-policy');
 
 const presentationCanvas = { width: 1920, height: 1080 };
 const mainRendererUrl = 'rwt://renderer/index.html';
@@ -33,13 +40,16 @@ const breakPromptRendererUrl = 'rwt://renderer/break-prompt.html';
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-http-cache');
-app.setName('背书自习监督');
+app.setName('凛冬督学局');
 
-// Keep deliberately saved speaker data separate from Chromium's per-run files.
+// Keep the legacy data directory stable across the visible product rename. It
+// may contain the user's existing encrypted speaker profile and preferences.
 const persistentDataRoot = process.env.SUPERVISION_DATA_DIR
   || path.join(app.getPath('appData'), '背书自习监督');
 fsSync.mkdirSync(persistentDataRoot, { recursive: true });
+app.setPath('userData', persistentDataRoot);
 const windowPreferencePath = path.join(persistentDataRoot, 'window-preferences.json');
+const studySettingsPath = path.join(persistentDataRoot, 'study-preferences.json');
 const transientSessionParent = path.join(persistentDataRoot, 'TransientElectronData');
 fsSync.mkdirSync(transientSessionParent, { recursive: true });
 
@@ -58,9 +68,9 @@ for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: 
 
 const transientSessionDataRoot = path.join(transientSessionParent, `run-${process.pid}`);
 fsSync.mkdirSync(transientSessionDataRoot, { recursive: true });
-// Keep Electron's default, stable userData path for Windows safeStorage. Only
-// sessionData is per-run and cleaned on exit, so browser session caches do not
-// become durable application data.
+// userData remains pinned to the legacy stable directory for Windows
+// safeStorage. Only sessionData is per-run and cleaned on exit, so browser
+// session caches do not become durable application data.
 app.setPath('sessionData', transientSessionDataRoot);
 const runtimeSessionPartition = 'rwt-runtime';
 
@@ -91,12 +101,15 @@ let runtimeSession = null;
 let inlineAlertSequence = 0;
 let inlineAlertState = null;
 let floatingRestoreBounds = null;
+let floatingPreferredSize = null;
 let mainWindowSkipsTaskbar = false;
 let windowModeTransitionSequence = 0;
 let windowTransitionChain = Promise.resolve();
 let backgroundPreferenceWriteChain = Promise.resolve();
+let studySettingsWriteChain = Promise.resolve();
 const pendingWindowModeTransitions = new Map();
 let backgroundPreference = readBackgroundPreference(windowPreferencePath);
+let studySettingsState = readStudySettings(studySettingsPath);
 
 const speakerModelFile = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx';
 const audioEventModelDirectory = 'audio-tagging-ced-mini';
@@ -104,8 +117,15 @@ const breakPromptSize = Object.freeze({ width: 420, height: 220 });
 const breakPromptMargin = 20;
 const sceneMinimumSize = Object.freeze({ width: 960, height: 540 });
 const floatingWindowSize = Object.freeze({ width: 320, height: 225 });
+const floatingWindowMinimumSize = Object.freeze({ width: 224, height: 170 });
 const floatingWindowMargin = 16;
 const windowModeRenderTimeoutMs = 1000;
+
+floatingPreferredSize = readFloatingWindowSize(windowPreferencePath, {
+  defaultSize: floatingWindowSize,
+  minimumSize: floatingWindowMinimumSize,
+  maximumSize: floatingWindowSize,
+});
 
 const contentTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -189,21 +209,38 @@ function setFloatingBounds(bounds) {
   mainWindow.setBounds(bounds, false);
 }
 
+function persistFloatingWindowSize() {
+  if (!floatingPreferredSize) return;
+  const size = { ...floatingPreferredSize };
+  const write = backgroundPreferenceWriteChain
+    .catch(() => {})
+    .then(() => writeFloatingWindowSize(windowPreferencePath, size));
+  backgroundPreferenceWriteChain = write.catch(() => {});
+}
+
 function positionFloatingWindow({ avoidBreakPrompt = false, useSavedPosition = true } = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const display = currentDisplay();
   const area = display.workArea;
   const defaultBounds = floatingWindowBounds(area, {
-    size: floatingWindowSize,
+    size: floatingPreferredSize || floatingWindowSize,
     margin: floatingWindowMargin,
   });
   if (!floatingRestoreBounds) floatingRestoreBounds = { ...defaultBounds };
   let bounds;
   if (useSavedPosition && floatingRestoreBounds && !avoidBreakPrompt) {
-    bounds = clampFloatingBounds(floatingRestoreBounds, area, floatingWindowSize);
+    bounds = clampFloatingBounds(
+      floatingRestoreBounds,
+      area,
+      floatingWindowSize,
+      floatingWindowMinimumSize,
+    );
   } else {
+    const preferredSize = floatingRestoreBounds
+      ? { width: floatingRestoreBounds.width, height: floatingRestoreBounds.height }
+      : (floatingPreferredSize || floatingWindowSize);
     bounds = floatingWindowBounds(area, {
-      size: floatingWindowSize,
+      size: preferredSize,
       margin: floatingWindowMargin,
       avoidBottomRight: avoidBreakPrompt ? breakPromptBounds() : null,
     });
@@ -278,7 +315,7 @@ function createBreakPromptWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
-    title: '背书自习监督 · 休息券',
+    title: '凛冬督学局 · 休息券',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#160c0b',
@@ -433,7 +470,7 @@ function createMainWindow() {
     fullscreen: false,
     frame: false,
     show: false,
-    title: '背书自习监督',
+    title: '凛冬督学局',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#120c0b',
@@ -468,10 +505,55 @@ function createMainWindow() {
   mainWindow.on('maximize', sendWindowMaximized);
   mainWindow.on('unmaximize', sendWindowMaximized);
   mainWindow.on('minimize', () => sendWindowMode(mainWindowMode, { minimized: true }));
-  mainWindow.on('will-move', (_event, nextBounds) => {
+  mainWindow.on('will-move', (event, nextBounds) => {
     if (mainWindowMode !== 'floating') return;
     const display = screen.getDisplayMatching(nextBounds);
-    floatingRestoreBounds = clampFloatingBounds(nextBounds, display.workArea, floatingWindowSize);
+    floatingRestoreBounds = clampFloatingBounds(
+      nextBounds,
+      display.workArea,
+      floatingWindowSize,
+      floatingWindowMinimumSize,
+    );
+    if (
+      floatingRestoreBounds.x !== nextBounds.x
+      || floatingRestoreBounds.y !== nextBounds.y
+      || floatingRestoreBounds.width !== nextBounds.width
+      || floatingRestoreBounds.height !== nextBounds.height
+    ) {
+      event.preventDefault();
+      mainWindow.setBounds(floatingRestoreBounds, false);
+    }
+  });
+  mainWindow.on('will-resize', (event, nextBounds) => {
+    if (mainWindowMode !== 'floating') return;
+    const display = screen.getDisplayMatching(nextBounds);
+    const clamped = clampFloatingBounds(
+      nextBounds,
+      display.workArea,
+      floatingWindowSize,
+      floatingWindowMinimumSize,
+    );
+    if (clamped.width === nextBounds.width && clamped.height === nextBounds.height) return;
+    event.preventDefault();
+    mainWindow.setBounds(clamped, false);
+  });
+  mainWindow.on('resize', () => {
+    if (mainWindowMode !== 'floating') return;
+    const bounds = mainWindow.getBounds();
+    const display = screen.getDisplayMatching(bounds);
+    floatingRestoreBounds = clampFloatingBounds(
+      bounds,
+      display.workArea,
+      floatingWindowSize,
+      floatingWindowMinimumSize,
+    );
+    floatingPreferredSize = {
+      width: floatingRestoreBounds.width,
+      height: floatingRestoreBounds.height,
+    };
+  });
+  mainWindow.on('resized', () => {
+    if (mainWindowMode === 'floating') persistFloatingWindowSize();
   });
   mainWindow.on('closed', () => {
     clearPendingWindowModeTransitions();
@@ -543,8 +625,8 @@ async function showFloatingWindowNow() {
   mainWindowMode = 'floating';
   mainWindow.setFullScreen(false);
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setMinimumSize(floatingWindowSize.width, floatingWindowSize.height);
-  mainWindow.setResizable(false);
+  mainWindow.setMinimumSize(floatingWindowMinimumSize.width, floatingWindowMinimumSize.height);
+  mainWindow.setResizable(true);
   mainWindow.setMinimizable(false);
   mainWindow.setMaximizable(false);
   setMainWindowSkipTaskbar(true);
@@ -751,7 +833,7 @@ function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'icon.ico');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('背书自习监督');
+  tray.setToolTip('凛冬督学局');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开督学场景', click: showSceneWindow },
     { label: '显示漂浮窗', click: () => hideToBackground('floating') },
@@ -912,6 +994,22 @@ app.whenReady().then(async () => {
         return { backgroundMode: backgroundPreference };
       });
     backgroundPreferenceWriteChain = write.catch(() => {});
+    return write;
+  }));
+  ipcMain.handle('study-settings:get', trustedRendererHandler(() => ({
+    exists: studySettingsState.exists,
+    settings: { ...studySettingsState.settings },
+  })));
+  ipcMain.handle('study-settings:set', trustedRendererHandler((_event, payload) => {
+    const settings = validateStudySettingsPayload(payload);
+    const write = studySettingsWriteChain
+      .catch(() => {})
+      .then(async () => {
+        const saved = await writeStudySettings(studySettingsPath, settings);
+        studySettingsState = { exists: true, settings: saved };
+        return { ...saved };
+      });
+    studySettingsWriteChain = write.catch(() => {});
     return write;
   }));
   ipcMain.handle('hide-to-background', trustedRendererHandler((_event, payload) => {

@@ -1,12 +1,12 @@
-# 背书自习监督测试说明
+# 凛冬督学局测试说明
 
 ## 总原则
 
 - 静态测试可以在项目根直接运行。
 - UI/CDP 测试必须使用隔离的数据目录和独立调试端口。
 - `speaker-ui-test.mjs` 与 `adversarial-ui-test.mjs` 会调用 `deleteSpeakerProfile()` 并退出被测应用，绝不能连接真实用户正在使用的安装版。
-- 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。
-- 1.12.0 本轮继续只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
+- 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。这个旧数据根在产品改名为“凛冬督学局”后仍刻意保留，不能把路径中的旧名误判为待迁移项。
+- 1.13.0 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
 
 ## Node 路径
 
@@ -48,6 +48,7 @@ cd D:\RedWatchRecite
 & $node scripts\speaker-service-test.cjs
 & $node scripts\window-mode-policy-test.cjs
 & $node scripts\floating-window-source-test.cjs
+& $node scripts\adversarial-user-simulation-test.cjs
 ```
 
 覆盖范围：
@@ -56,18 +57,36 @@ cd D:\RedWatchRecite
 |---|---|
 | `scene-rules-test.cjs` | 开场/结束、随机池、30～120 秒、25% 独立事件、三级违规、仅预览资源 |
 | `study-policy-test.cjs` | 双模式阈值、有效学习时钟、休息券/表扬里程碑和自习累计状态机 |
-| `vad-adversarial-test.cjs` | 背书模式的稳态风扇、真人响应与自适应 VAD 边界；自习模式不得引用该 VAD 结果 |
-| `audio-event-policy-test.cjs` | CED 标签归类、概率边界、键盘单独放行、键盘与两项媒体双证据、3～15 秒阈值、重叠抵扣、学习中设置变更作废旧 generation，以及通用状态机的可选 gap 兼容分支；当前自习应用链路不启用 gap 容忍 |
+| `vad-adversarial-test.cjs` | 背书模式固定 8 dB、高召回 VAD、稳态风扇、朗读污染的保守噪声上限及适应后 300 ms 恢复；自习模式不得引用该 VAD 结果 |
+| `audio-event-policy-test.cjs` | CED 人声 0.12、音乐/通用媒体 0.20、常见媒体音效集合、键盘单独放行、3～15 秒阈值、重叠抵扣、5 秒漏窗恢复和设置变更作废旧 generation |
 | `audio-event-model-smoke.cjs` | 纯 Node 加载实际 CED Mini；静音与合成键盘负样本；可选临时官方媒体和真实键盘混音正样本 |
 | `speaker-audio-test.cjs` | 重采样、24 秒、8 个 2.4 秒窗口、动态范围 |
 | `speaker-model-test.cjs` | 打印 3 个身份 fixture 的相似度矩阵；该脚本没有完整阈值断言 |
 | `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed |
 | `profile-crypto-test.cjs` | 当前 Windows 用户 DPAPI 的加密、非明文保存与跨独立子进程解密；不读写用户声纹档案 |
-| `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、休息提示避让，以及隔离临时目录中的偏好原子覆盖与损坏回退 |
-| `floating-window-source-test.cjs` | 漂浮模式复用主窗口、最小 preload 白名单、只含结果/动画/悬停计时与操作、同 Canvas 16:9 和提醒原状态返回的源码门禁 |
+| `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、224×170～320×225 尺寸钳制/持久化，以及偏好原子覆盖与损坏回退 |
+| `floating-window-source-test.cjs` | 同主窗口/Canvas、全区域拖动与按钮 no-drag、漂浮窗无音量/底噪控件、hover/focus 后台菜单、取消双击放大、黄色动画状态和提醒原状态返回的源码门禁 |
+| `adversarial-user-simulation-test.cjs` | 连续/断续视频、4/5 秒恢复边界、键盘/风扇/纯游戏音效，用户端底噪控件完全移除、声纹在途禁止处罚/5 秒失败关闭，以及漂浮缩放、多屏、偏好损坏、菜单和黄色文案等刁难用户场景 |
 | `release-package-static-test.cjs <candidate-root>` | 不运行 EXE，直接核对候选 `app.asar` 的版本、核心源码哈希、22 段动画/22 份源音轨、模型/原生依赖和用户数据排除项 |
 
 `speaker-service-test.cjs` 只使用并清理 `work/speaker-service-test-data`。若修改该路径，必须重新确认不会指向用户数据。
+
+### 1.13.0 本轮验证边界
+
+2026-07-22 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。修复后的 1.13.0 候选已在隔离目录完成后台构建、解包、核心源码哈希和禁止项核对；实际字节数与 SHA-256 见 `USER_GUIDE.md` 和 `RELEASE.md`。
+
+“刁难用户”审查至少覆盖：
+
+- 在状态、计时和动画区域拖动，按钮点击不误拖；多屏/负坐标钳制后窗口仍可找回。
+- 把漂浮窗缩到 224×170、放到 320×225，反复进出并重启恢复；非法偏好钳制且不崩溃。
+- hover、focus、Escape 与快速选择两种后台方式时，菜单不黏住、不与按钮堆叠，旧异步选择不覆盖新选择。
+- 动画期间主状态、底部状态、预检状态和漂浮状态均显示黄色精确文案，结束后恢复实时判断。
+- 背书界面、折叠/展开面板和漂浮布局均不存在底噪/抗噪滑块、白色门槛线或手动重校准；旧 `reciteSensitivityDb` 不参与检测并在下次保存后消失。
+- 用稳定风扇、正常朗读和“最初约 3 秒已经朗读”的污染序列验证固定 8 dB VAD：风扇不形成候选，朗读污染后噪声基线受保守上限保护，适应完成后的语音候选在 300 ms 内恢复。
+- 视频“播放—暂停不足 5 秒—继续”不重置；连续正常满 5 秒才清；键盘单独/风扇放行，语音、音乐和常见音效达到阈值。
+- 漂浮、隐藏和完整场景中触发提醒、休息、结束与异常时返回正确状态，不新增违规窗口。
+
+本轮只能用策略/源码后台测试覆盖可自动部分；真实指针、窗口观感、黑帧和按钮堆叠仍待独立 Windows 会话或虚拟机，不能声称已实测。
 
 ### 1.12.0 本轮后台结果
 
@@ -112,7 +131,7 @@ Remove-Item Env:BEISHU_AUDIO_EVENT_FIXTURES, Env:BEISHU_KEYBOARD_FIXTURES, Env:B
 
 ## 隔离启动开发版
 
-本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.12.0 明确跳过本节及后续全部 UI/CDP 脚本。
+本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.13.0 明确跳过本节及后续全部 UI/CDP 脚本。
 
 为每个 UI 测试创建新的数据目录和端口：
 
@@ -149,7 +168,7 @@ $app = Start-Process -FilePath $electron -ArgumentList @('.', "--remote-debuggin
 | `media-runtime-test.mjs` | 否 | 否 | 3092 帧、222 图集、22 音轨哈希和接缝连续性 |
 | `speaker-ui-test.mjs` | 是 | 是 | 纯麦克风录入、本人/他人、无摄像头、按钮不重叠 |
 | `adversarial-ui-test.mjs` | 是 | 是 | 完整场景状态机、音轨分级、表扬字幕、同主窗口违规、无黑屏，以及候选包标题栏三键/双击/隐藏回归 |
-| `mode-rest-ui-test.mjs` | 是 | 是 | 双模式阈值、待命检测测试、主面板出声条、双作者署名、960×540 原生最小尺寸、标题栏三键/双击、独立休息提示窗、休息恢复和异常清理 |
+| `mode-rest-ui-test.mjs` | 是 | 是 | 双模式时间阈值、待命检测测试、底噪控件缺席/旧设置迁移、主面板出声条、双作者署名、960×540 原生最小尺寸、标题栏三键/双击、独立休息提示窗、休息恢复和异常清理 |
 | `capture-ui.mjs` | 否 | 否 | 截取待命或提醒界面用于人工布局核对 |
 
 表中 `mode-rest-ui-test.mjs` 的“主动退出”和“删除被测声纹”只针对它自行创建的隔离源码实例。
@@ -160,17 +179,17 @@ $app = Start-Process -FilePath $electron -ArgumentList @('.', "--remote-debuggin
 if ($app -and -not $app.HasExited) { Stop-Process -Id $app.Id }
 ```
 
-确认没有仍指向 `$testData` 的测试进程后，才可删除这个隔离目录。不要按进程名批量结束“背书自习监督”，因为用户可能正在运行正式版。
+确认没有仍指向 `$testData` 的测试进程后，才可删除这个隔离目录。不要按进程名批量结束“凛冬督学局”，因为用户可能正在运行正式版。
 
 ## 安装版验证
 
-不得直接测试用户已安装的背书自习监督。NSIS 构建生成的 `win-unpacked` 仅用于隔离候选验证；安装器本体需要在人工确认后安装到单独目录：
+不得直接测试用户已安装的凛冬督学局。NSIS 构建生成的 `win-unpacked` 仅用于隔离候选验证；安装器本体需要在人工确认后安装到单独目录：
 
 ```powershell
 $candidateRoot = 'D:\RedWatchRecite\work\release-candidate-<version>\win-unpacked'
 $testData = Join-Path $env:TEMP "study-supervisor-ui-$([guid]::NewGuid().ToString('N'))"
 $env:SUPERVISION_DATA_DIR = $testData
-Start-Process -FilePath (Join-Path $candidateRoot '背书自习监督.exe') -ArgumentList '--remote-debugging-port=9444' -WindowStyle Hidden
+Start-Process -FilePath (Join-Path $candidateRoot '凛冬督学局.exe') -ArgumentList '--remote-debugging-port=9444' -WindowStyle Hidden
 ```
 
 只对这个候选运行 CDP/UI 测试。退出并确认没有从该目录运行的进程后，再删除 `$testData`。安装版的主窗口和休息提示都必须使用内存会话：`webContents.session.storagePath` 为 `null`，且测试数据目录中不得出现 `SessionData`、`Code Cache` 或 `GPUCache`。
@@ -183,9 +202,10 @@ Start-Process -FilePath (Join-Path $candidateRoot '背书自习监督.exe') -Arg
 - 开发版 smoke、media、speaker UI、完整 adversarial 通过。
 - `work\release-candidate-<version>\win-unpacked` 候选至少通过 smoke、speaker UI 和完整 adversarial；窗口外壳检查必须实际连接候选包，不能只测源码。需要 UI 门禁时必须在清理隔离候选目录前完成。
 - 初始界面先显示“开始学习”，提醒不会抢先出现；主学习面板的出声状态始终可见。
-- 开始前测试使用 audio-only 正式链路。背书测试先校准约 3 秒底噪并共享最多 3 秒在途声纹验证宽限；自习测试不得创建 `AdaptiveVad`、不得等待底噪校准，直接收集约 2 秒首个 CED Mini 窗口。测试达到条件只能显示预期提醒提示，不能改变正式会话状态。
-- 背书模式下，检测面板收起时白色门槛线仍可通过 pointer/键盘改变抗噪设置，并与 range、ARIA、localStorage 和 VAD 同步。自习模式必须隐藏两条白线、抗噪 range 和重校准按钮；音量条只显示原始 RMS，数值不得输入 CED Mini 或 `QuietModeDetector`。
-- 自习预检首次有效分类约需 2 秒，之后约每 1 秒更新；三个连续阳性窗口抵扣重叠后只能累计约 2 秒，第四个才可达到 3 秒门槛。预检或正式学习中改变持续时间时，旧分类缓冲、在途 generation、锁定和累计必须立即清零，并能从新的约 2 秒窗口重新暖机；自习不存在门槛/sensitivity 修改路径。
+- 开始前测试使用 audio-only 正式链路。背书测试先自动适应环境约 3 秒，再走高召回 VAD 与 CAM++；候选采集最多宽限 3 秒，CAM++ 已开始复核时禁止处罚，渲染侧单次复核超过 5 秒必须安全停止且未计违规。自习测试不得创建 `AdaptiveVad` 或等待环境适应，直接收集约 2 秒首个 CED Mini 窗口。测试达到条件只能显示预期提醒提示，不能改变正式会话状态。
+- 背书和自习的折叠/展开界面都不得存在白色门槛线、底噪/抗噪 range 或重校准按钮，漂浮布局也不得存在底噪条。两条主界面音量活动条只显示原始 RMS，数值不得直接作为 CAM++ 终判或输入 CED Mini/`QuietModeDetector`。运行时 VAD 余量固定为 8 dB，不序列化；载入含 `reciteSensitivityDb` 的旧设置后必须忽略该值，并在下一次保存时移除字段。
+- 正式背书中改变 20～60 秒提醒时间不得重置未确认计时或在途候选；正式自习中改变 3～15 秒持续时间不得把已经形成的媒体证据清零。只有待命预检为便于重新观察，才允许重置本次预检显示/累计。
+- 自习预检首次有效分类约需 2 秒，之后约每 1 秒更新；三个连续阳性窗口抵扣重叠后只能累计约 2 秒，第四个才可达到 3 秒阈值。预检中改变持续时间时，旧分类缓冲、在途 generation、锁定和累计必须立即清零，并能从新的约 2 秒窗口重新暖机；正式学习中只更新阈值并保留已有证据。自习不存在音量/sensitivity 修改路径。
 - 背书无声纹时不能伪装成本人检测；停止测试、开始学习、切换模式、声纹录入、最小化/隐藏窗口和退出都必须释放测试音频流，正式开始后最多只有一条麦克风音轨。选中的麦克风必须持久化，且待命测试与正式链路均使用其精确 `deviceId`。
 - 声纹服务须保留最多五份同一用户模板；删除一份后其余模板仍可识别，schema 2 单份档案可安全载入为“原有声纹”。
 - 使用当前 Windows 用户的 DPAPI 加密一份隔离声纹档案后，必须能由新的 Node/PowerShell 子进程解密；测试不得接触真实 `speaker-profile.dat`。
@@ -194,8 +214,8 @@ Start-Process -FilePath (Join-Path $candidateRoot '背书自习监督.exe') -Arg
 - 主窗口标题栏可拖动、双击最大化/还原；最小化、最大化/还原和隐藏到后台三键均可用，顺序正确，960×540 下不与模式按钮或页面按钮重叠。
 - 主窗口、子 frame 与休息提示页不能越权调用不属于自己的 IPC；新窗口和非预期导航会被拒绝。
 - 默认只有一个主窗口；休息提示出现时恰好两个窗口且不替换主 webContents；违规仍恢复同一个主窗口。
-- 背书阈值 20～60 秒、自习媒体证据阈值 3～15 秒均正确钳制；键盘单独不累计，键盘与媒体双证据仍累计；自习应用链路要求连续阳性，任一阴性分类窗口立即清空候选，连续阳性仍抵扣约 1 秒滚动窗口重叠。
-- 背书 20 分钟、自习 45 分钟各获得一张两分钟休息券；休息不计时，结束后主窗前台且只播放一次有声 `E1 → S1 → X1`。背书随后校准约 3 秒；自习直接恢复分类并等待约 2 秒首窗，不能出现底噪校准阶段。
+- 背书阈值 20～60 秒、自习媒体证据阈值 3～15 秒均正确钳制；键盘单独不累计，键盘与媒体双证据仍累计；孤立阴性分类窗保留候选，连续正常 5 秒才清除，5 秒内媒体恢复沿用原累计，连续阳性仍抵扣约 1 秒滚动窗口重叠。
+- 背书 20 分钟、自习 45 分钟各获得一张两分钟休息券；休息不计时，结束后主窗前台且只播放一次有声 `E1 → S1 → X1`。背书随后自动适应环境约 3 秒；自习直接恢复分类并等待约 2 秒首窗，不能出现环境适应阶段。
 - 普通动画静音；开场、结束、违规、里程碑表扬和休息恢复音轨与画面一一对应。
 - 表扬字幕位于下侧且不遮挡教官或按钮；背书每 45 分钟、自习每 60 分钟触发。
 - 无摄像头、无音频导入、无黑帧、无按钮重叠。

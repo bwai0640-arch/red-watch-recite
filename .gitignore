@@ -12,6 +12,7 @@
 /RedWatchReciteData/
 **/RedWatchReciteData/
 **/speaker-profile.dat*
+**/study-preferences.json
 
 # Local audit artifacts and real-person test recordings
 /work/

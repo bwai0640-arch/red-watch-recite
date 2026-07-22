@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electronExecutable = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
 const workRoot = path.join(projectRoot, 'work');
+const rendererAppSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
 
 if (!fs.existsSync(electronExecutable)) {
   throw new Error(`Source Electron runtime not found: ${electronExecutable}`);
@@ -31,6 +32,23 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const loadSettingsSource = rendererAppSource.match(
+  /async function loadSettings\(\) \{[\s\S]*?\n\}\n\nlet studySettingsSaveChain/,
+)?.[0] || '';
+assert(loadSettingsSource.includes('window.desktopAPI.getStudySettings()'),
+  'Renderer settings no longer load through the durable desktop API');
+assert(loadSettingsSource.includes('if (!durable?.exists)'),
+  'Legacy browser settings are not restricted to first durable migration');
+assert(loadSettingsSource.includes("localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY)"),
+  'Legacy browser settings are no longer read during first migration');
+assert(loadSettingsSource.includes('window.desktopAPI.setStudySettings(settings)'),
+  'Legacy browser settings are not written through the validated desktop API');
+assert(loadSettingsSource.indexOf('window.desktopAPI.setStudySettings(settings)')
+  < loadSettingsSource.indexOf('localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY)'),
+  'Legacy browser settings are deleted before their one-time durable migration completes');
+assert(!rendererAppSource.includes('localStorage.setItem('),
+  'Renderer still treats browser localStorage as current settings persistence');
 
 function assertArray(actual, expected, message) {
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${message}: ${JSON.stringify(actual)}`);
@@ -475,8 +493,8 @@ try {
     runtime: await window.desktopAPI.getRuntimeWindowState(),
     cache: await window.desktopAPI.getRuntimeCacheState()
   }))()`);
-  assert(report.initial.documentTitle === '背书自习监督', `Unexpected product title: ${report.initial.documentTitle}`);
-  assert(report.initial.heading === '背书自习监督', `Unexpected product heading: ${report.initial.heading}`);
+  assert(report.initial.documentTitle === '凛冬督学局', `Unexpected product title: ${report.initial.documentTitle}`);
+  assert(report.initial.heading === '凛冬督学局', `Unexpected product heading: ${report.initial.heading}`);
   assert(report.initial.creatorCredit === '原作：叛逆蓝牙 · 二创：眼泪斷了线',
     `Creator attribution is missing or wrong: ${report.initial.creatorCredit}`);
   assert(report.initial.runtime.windowCount === 1, 'Fresh source instance did not start with one window');
@@ -491,6 +509,7 @@ try {
   report.ipcBoundary = await main.evaluate(`(async () => {
     let invalidPayloadRejected = false;
     let extraFieldRejected = false;
+    let extraStudySettingsFieldRejected = false;
     try {
       await window.desktopAPI.finishInlineAlert({ alertId: '1', disposition: 'return' });
     } catch {
@@ -501,14 +520,30 @@ try {
     } catch {
       extraFieldRejected = true;
     }
+    const studySettingsBefore = await window.desktopAPI.getStudySettings();
+    try {
+      await window.desktopAPI.setStudySettings({
+        ...studySettingsBefore.settings,
+        extra: true,
+      });
+    } catch {
+      extraStudySettingsFieldRejected = true;
+    }
+    const studySettingsAfter = await window.desktopAPI.getStudySettings();
     return {
       invalidPayloadRejected,
       extraFieldRejected,
+      extraStudySettingsFieldRejected,
+      rejectedStudySettingsUnchanged: JSON.stringify(studySettingsAfter.settings)
+        === JSON.stringify(studySettingsBefore.settings),
       popupBlocked: window.open('about:blank') === null,
     };
   })()`);
   assert(report.ipcBoundary.invalidPayloadRejected && report.ipcBoundary.extraFieldRejected,
     `Invalid finish-inline-alert payload was accepted: ${JSON.stringify(report.ipcBoundary)}`);
+  assert(report.ipcBoundary.extraStudySettingsFieldRejected
+    && report.ipcBoundary.rejectedStudySettingsUnchanged,
+  `Invalid study settings payload changed durable settings: ${JSON.stringify(report.ipcBoundary)}`);
   assert(report.ipcBoundary.popupBlocked, 'Main renderer was allowed to create a new window');
 
   report.floatingShell = await main.evaluate(`(async () => {
@@ -516,6 +551,10 @@ try {
     await window.desktopAPI.hideToBackground('floating');
     const statusbar = document.querySelector('#floating-statusbar');
     const canvas = document.querySelector('#study-scene-canvas');
+    const hoverTools = document.querySelector('.floating-hover-tools');
+    const timer = document.querySelector('#floating-timer');
+    const hideButton = document.querySelector('#floating-hide-button');
+    const expandButton = document.querySelector('#floating-expand-button');
     const canvasRect = canvas.getBoundingClientRect();
     const statusRect = statusbar.getBoundingClientRect();
     return {
@@ -527,6 +566,14 @@ try {
       liveMeterVisible: document.querySelector('#live-meter').getClientRects().length > 0,
       panelMeterVisible: document.querySelector('.meter-wrap .meter').getClientRects().length > 0,
       hoverToolsOpacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+      dragRegions: {
+        statusbar: getComputedStyle(statusbar).getPropertyValue('-webkit-app-region'),
+        canvas: getComputedStyle(canvas).getPropertyValue('-webkit-app-region'),
+        hoverTools: getComputedStyle(hoverTools).getPropertyValue('-webkit-app-region'),
+        timer: getComputedStyle(timer).getPropertyValue('-webkit-app-region'),
+        hideButton: getComputedStyle(hideButton).getPropertyValue('-webkit-app-region'),
+        expandButton: getComputedStyle(expandButton).getPropertyValue('-webkit-app-region'),
+      },
       canvasAspect: canvasRect.width / canvasRect.height,
       canvasIdentityStable: canvas === document.querySelector('#study-scene-canvas'),
       hoverPoint: { x: statusRect.left + statusRect.width / 2, y: statusRect.top + statusRect.height / 2 },
@@ -536,7 +583,11 @@ try {
     && report.floatingShell.runtime.visible
     && report.floatingShell.runtime.alwaysOnTop
     && report.floatingShell.runtime.skipTaskbar
-    && !report.floatingShell.runtime.resizable,
+    && report.floatingShell.runtime.resizable
+    && report.floatingShell.runtime.minimumSize?.width === 224
+    && report.floatingShell.runtime.minimumSize?.height === 170
+    && report.floatingShell.runtime.bounds?.width <= 320
+    && report.floatingShell.runtime.bounds?.height <= 225,
   `Floating native window contract failed: ${JSON.stringify(report.floatingShell)}`);
   assert(report.floatingShell.runtime.windowCount === 1
     && report.floatingShell.runtime.webContentsId === mainWebContentsId
@@ -551,6 +602,13 @@ try {
   `Floating mode exposed extra UI: ${JSON.stringify(report.floatingShell)}`);
   assert(Math.abs(report.floatingShell.canvasAspect - (16 / 9)) < 0.03,
     `Floating canvas is not 16:9: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.dragRegions.statusbar === 'drag'
+    && report.floatingShell.dragRegions.canvas === 'drag'
+    && report.floatingShell.dragRegions.hoverTools === 'drag'
+    && report.floatingShell.dragRegions.timer === 'drag'
+    && report.floatingShell.dragRegions.hideButton === 'no-drag'
+    && report.floatingShell.dragRegions.expandButton === 'no-drag',
+  `Floating drag and button hit regions overlap incorrectly: ${JSON.stringify(report.floatingShell.dragRegions)}`);
 
   await main.send('Input.dispatchMouseEvent', {
     type: 'mouseMoved',
@@ -584,7 +642,7 @@ try {
     && report.floatingAlertReturn.returned.mode === 'floating'
     && report.floatingAlertReturn.returned.alwaysOnTop
     && report.floatingAlertReturn.returned.skipTaskbar
-    && !report.floatingAlertReturn.returned.resizable
+    && report.floatingAlertReturn.returned.resizable
     && !report.floatingAlertReturn.returned.minimizable
     && !report.floatingAlertReturn.returned.maximizable,
   `Floating alert did not return to the same compact contract: ${JSON.stringify(report.floatingAlertReturn)}`);
@@ -740,10 +798,8 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
-      liveThresholdHidden: document.querySelector('#live-volume-threshold').hidden,
-      detailThresholdHidden: document.querySelector('#volume-threshold').hidden,
-      thresholdSettingHidden: document.querySelector('#voice-threshold-input').closest('label').hidden,
-      recalibrateHidden: document.querySelector('#recalibrate-button').hidden,
+      reciteDurationHidden: document.querySelector('#silence-limit-input').closest('label').hidden,
+      studyDurationHidden: document.querySelector('#study-voice-limit-input').closest('label').hidden,
     };
     document.querySelector('#recite-mode-button').click();
     const recite = {
@@ -752,10 +808,8 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
-      liveThresholdHidden: document.querySelector('#live-volume-threshold').hidden,
-      detailThresholdHidden: document.querySelector('#volume-threshold').hidden,
-      thresholdSettingHidden: document.querySelector('#voice-threshold-input').closest('label').hidden,
-      recalibrateHidden: document.querySelector('#recalibrate-button').hidden,
+      reciteDurationHidden: document.querySelector('#silence-limit-input').closest('label').hidden,
+      studyDurationHidden: document.querySelector('#study-voice-limit-input').closest('label').hidden,
     };
     return { study, recite };
   })()`);
@@ -763,131 +817,77 @@ try {
     && report.modeSwitch.study.title.includes('自习')
     && report.modeSwitch.study.recitePressed === 'false'
     && report.modeSwitch.study.studyPressed === 'true'
-    && report.modeSwitch.study.liveThresholdHidden
-    && report.modeSwitch.study.detailThresholdHidden
-    && report.modeSwitch.study.thresholdSettingHidden
-    && report.modeSwitch.study.recalibrateHidden,
-  `Switching to study mode did not hide recite-only threshold controls: ${JSON.stringify(report.modeSwitch.study)}`);
+    && report.modeSwitch.study.reciteDurationHidden
+    && !report.modeSwitch.study.studyDurationHidden,
+  `Switching to study mode did not expose the correct duration control: ${JSON.stringify(report.modeSwitch.study)}`);
   assert(report.modeSwitch.recite.mode === 'recite'
     && report.modeSwitch.recite.title.includes('背书')
     && report.modeSwitch.recite.recitePressed === 'true'
     && report.modeSwitch.recite.studyPressed === 'false'
-    && !report.modeSwitch.recite.liveThresholdHidden
-    && !report.modeSwitch.recite.detailThresholdHidden
-    && !report.modeSwitch.recite.thresholdSettingHidden
-    && !report.modeSwitch.recite.recalibrateHidden,
-  `Switching back to recite mode did not restore recite-only threshold controls: ${JSON.stringify(report.modeSwitch.recite)}`);
+    && !report.modeSwitch.recite.reciteDurationHidden
+    && report.modeSwitch.recite.studyDurationHidden,
+  `Switching back to recite mode did not expose the correct duration control: ${JSON.stringify(report.modeSwitch.recite)}`);
 
-  report.collapsedThresholdDrag = await main.evaluate(`(() => {
-    const marker = document.querySelector('#live-volume-threshold');
-    const detailMarker = document.querySelector('#volume-threshold');
-    const meter = document.querySelector('#live-meter');
-    const range = document.querySelector('#voice-threshold-input');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 41;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      button: 0,
-      buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
+  report.automaticReciteGate = await main.evaluate(`(async () => {
+    const removedSelectors = [
+      '#floating-threshold-input',
+      '#live-volume-threshold',
+      '#volume-threshold',
+      '#voice-threshold-input',
+      '#recalibrate-button',
+    ];
+    const snapshot = window.__beishuTest.getSnapshot();
+    const originalEnvelope = await window.desktopAPI.getStudySettings();
+    const original = originalEnvelope.settings;
+    localStorage.setItem('red-watch-study-settings-v1', JSON.stringify({
+      ...original,
+      mode: original.mode === 'recite' ? 'study' : 'recite',
+      reciteSilenceSeconds: original.reciteSilenceSeconds === 60 ? 20 : 60,
+      reciteSensitivityDb: 18,
     }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      buttons: 1,
-      clientX: rect.left + rect.width * 0.64,
+    await loadSettings();
+    await saveSettings();
+    const afterFirstLoad = await window.desktopAPI.getStudySettings();
+    const firstLegacyRemoved = localStorage.getItem('red-watch-study-settings-v1') === null;
+    localStorage.setItem('red-watch-study-settings-v1', JSON.stringify({
+      ...original,
+      reciteSilenceSeconds: original.reciteSilenceSeconds === 20 ? 60 : 20,
+      reciteSensitivityDb: 99,
     }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      button: 0,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    const keyboardValues = [];
-    for (const key of ['ArrowRight', 'Home', 'End', 'ArrowLeft']) {
-      marker.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key }));
-      keyboardValues.push(Number(range.value));
-    }
+    await loadSettings();
+    await saveSettings();
+    const afterSecondLoad = await window.desktopAPI.getStudySettings();
     return {
-      controlsOpen: document.body.classList.contains('controls-open'),
-      keyboardValues,
-      stored: window.__beishuTest.getSnapshot().reciteSensitivityDb,
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).reciteSensitivityDb,
-      range: Number(range.value),
-      liveLeft: marker.style.left,
-      detailLeft: detailMarker.style.left,
-      liveAria: {
-        min: marker.getAttribute('aria-valuemin'),
-        max: marker.getAttribute('aria-valuemax'),
-        now: marker.getAttribute('aria-valuenow'),
-        text: marker.getAttribute('aria-valuetext'),
-        role: marker.getAttribute('role'),
-        tabIndex: marker.tabIndex,
-      },
-      detailAriaNow: detailMarker.getAttribute('aria-valuenow'),
+      removed: removedSelectors.every((selector) => !document.querySelector(selector)),
+      reciteUsesAutomaticVoiceGate: snapshot.reciteUsesAutomaticVoiceGate,
+      reciteAutoVoiceMarginDb: snapshot.reciteAutoVoiceMarginDb,
+      durableSettingsExist: originalEnvelope.exists === true,
+      firstLegacyRemoved,
+      secondLegacyRemoved: localStorage.getItem('red-watch-study-settings-v1') === null,
+      legacyNotReimported: JSON.stringify(afterFirstLoad.settings) === JSON.stringify(original)
+        && JSON.stringify(afterSecondLoad.settings) === JSON.stringify(original),
+      oldSensitivityRemoved: !Object.prototype.hasOwnProperty.call(afterFirstLoad.settings, 'reciteSensitivityDb')
+        && !Object.prototype.hasOwnProperty.call(afterSecondLoad.settings, 'reciteSensitivityDb'),
+      reciteSilenceSecondsPreserved: afterSecondLoad.settings.reciteSilenceSeconds
+        === original.reciteSilenceSeconds,
+      labels: [...document.querySelectorAll('.meter-labels span')].map((item) => item.textContent),
     };
   })()`);
-  assert(!report.collapsedThresholdDrag.controlsOpen
-    && JSON.stringify(report.collapsedThresholdDrag.keyboardValues) === JSON.stringify([15, 4, 18, 17])
-    && report.collapsedThresholdDrag.stored === 17
-    && report.collapsedThresholdDrag.persisted === 17
-    && report.collapsedThresholdDrag.range === 17
-    && report.collapsedThresholdDrag.liveLeft === '67%'
-    && report.collapsedThresholdDrag.detailLeft === '67%'
-    && report.collapsedThresholdDrag.liveAria.min === '4'
-    && report.collapsedThresholdDrag.liveAria.max === '18'
-    && report.collapsedThresholdDrag.liveAria.now === '17'
-    && report.collapsedThresholdDrag.liveAria.text === '底噪 + 17 dB'
-    && report.collapsedThresholdDrag.liveAria.role === 'slider'
-    && report.collapsedThresholdDrag.liveAria.tabIndex === 0
-    && report.collapsedThresholdDrag.detailAriaNow === '17',
-  `Collapsed live threshold marker did not drag, clamp, persist, or synchronize: ${JSON.stringify(report.collapsedThresholdDrag)}`);
+  assert(report.automaticReciteGate.removed
+    && report.automaticReciteGate.reciteUsesAutomaticVoiceGate
+    && report.automaticReciteGate.reciteAutoVoiceMarginDb === 8
+    && report.automaticReciteGate.durableSettingsExist
+    && report.automaticReciteGate.firstLegacyRemoved
+    && report.automaticReciteGate.secondLegacyRemoved
+    && report.automaticReciteGate.legacyNotReimported
+    && report.automaticReciteGate.oldSensitivityRemoved
+    && report.automaticReciteGate.reciteSilenceSecondsPreserved
+    && JSON.stringify(report.automaticReciteGate.labels) === JSON.stringify(['较轻', '较响']),
+  `Automatic recite gate UI or legacy-setting migration is inconsistent: ${JSON.stringify(report.automaticReciteGate)}`);
 
   await main.evaluate(`document.querySelector('#controls-button').click()`);
   report.layouts.wideExpanded = await main.evaluate(layoutExpression);
   assertLayout(report.layouts.wideExpanded, '1920 expanded layout');
-
-  report.detailThresholdDrag = await main.evaluate(`(() => {
-    const marker = document.querySelector('#volume-threshold');
-    const liveMarker = document.querySelector('#live-volume-threshold');
-    const meter = document.querySelector('.meter-wrap .meter');
-    const range = document.querySelector('#voice-threshold-input');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 42;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, pointerId, pointerType: 'touch', button: 0, buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
-    }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true, pointerId, pointerType: 'touch', buttons: 1,
-      clientX: rect.left + rect.width * 0.61,
-    }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true, pointerId, pointerType: 'touch', button: 0,
-      clientX: rect.left + rect.width * 0.61,
-    }));
-    return {
-      stored: window.__beishuTest.getSnapshot().reciteSensitivityDb,
-      range: Number(range.value),
-      detailLeft: marker.style.left,
-      liveLeft: liveMarker.style.left,
-      detailAriaNow: marker.getAttribute('aria-valuenow'),
-      liveAriaNow: liveMarker.getAttribute('aria-valuenow'),
-    };
-  })()`);
-  assert(report.detailThresholdDrag.stored === 11
-    && report.detailThresholdDrag.range === 11
-    && report.detailThresholdDrag.detailLeft === '61%'
-    && report.detailThresholdDrag.liveLeft === '61%'
-    && report.detailThresholdDrag.detailAriaNow === '11'
-    && report.detailThresholdDrag.liveAriaNow === '11',
-  `Detailed threshold marker did not update the hidden range and live marker: ${JSON.stringify(report.detailThresholdDrag)}`);
 
   report.reciteBoundary = await main.evaluate(rangeBoundaryExpression(
     '#silence-limit-input',
@@ -980,21 +980,25 @@ try {
         return destination.stream;
       }
     });
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
+    ];
     Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
       configurable: true,
-      value: async () => [
-        { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
-        { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
-      ],
+      value: async () => window.__testMicrophoneDevices.map((device) => ({ ...device })),
     });
     await refreshMicrophones({ requestPermission: true });
     const microphone = document.querySelector('#microphone-select');
     microphone.value = 'mic-b';
     microphone.dispatchEvent(new Event('change', { bubbles: true }));
+    await saveSettings();
+    const persistedMicrophone = await window.desktopAPI.getStudySettings();
     window.__microphoneSelection = {
       options: [...microphone.options].map((option) => ({ value: option.value, text: option.textContent.trim() })),
       selected: microphone.value,
-      settings: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).microphoneDeviceId,
+      settings: persistedMicrophone.settings.microphoneDeviceId,
+      label: persistedMicrophone.settings.microphoneDeviceLabel,
       constraints: microphoneConstraints(),
     };
     window.__gumCalls = [];
@@ -1025,10 +1029,44 @@ try {
   report.microphoneSelection = await main.evaluate(`window.__microphoneSelection`);
   assert(report.microphoneSelection.selected === 'mic-b'
     && report.microphoneSelection.settings === 'mic-b'
+    && report.microphoneSelection.label === 'USB 麦克风'
     && report.microphoneSelection.options.length === 3
     && report.microphoneSelection.constraints.audio.deviceId.exact === 'mic-b'
     && report.microphoneSelection.constraints.video === false,
   `Microphone selection was not persisted or applied: ${JSON.stringify(report.microphoneSelection)}`);
+
+  report.missingMicrophone = await main.evaluate(`(async () => {
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-c', label: 'USB 麦克风' },
+    ];
+    await refreshMicrophones();
+    await saveSettings();
+    const select = document.querySelector('#microphone-select');
+    const persisted = await window.desktopAPI.getStudySettings();
+    const result = {
+      selected: select.value,
+      storedId: persisted.settings.microphoneDeviceId,
+      storedLabel: persisted.settings.microphoneDeviceLabel,
+      missingOption: [...select.options].some((option) => option.value === 'mic-b'
+        && option.textContent.includes('当前不可用')),
+      status: document.querySelector('#microphone-status').textContent.trim(),
+      constraints: microphoneConstraints(),
+    };
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
+    ];
+    await refreshMicrophones();
+    return result;
+  })()`);
+  assert(report.missingMicrophone.selected === 'mic-b'
+    && report.missingMicrophone.storedId === 'mic-b'
+    && report.missingMicrophone.storedLabel === 'USB 麦克风'
+    && report.missingMicrophone.missingOption
+    && report.missingMicrophone.status.includes('当前不可用')
+    && report.missingMicrophone.constraints.audio.deviceId.exact === 'mic-b',
+  `Missing selected microphone was silently replaced: ${JSON.stringify(report.missingMicrophone)}`);
 
   report.preflightStarted = await main.evaluate(`(async () => {
     document.querySelector('#study-mode-button').click();
@@ -1125,10 +1163,11 @@ try {
 
     const firstEvidence = applyDecision(mediaDecision);
     const secondEvidence = applyDecision(mediaDecision);
-    const clearedByQuiet = applyDecision(quietDecision);
-    const threeSecondUpdates = Array.from({ length: 4 }, () => applyDecision(mediaDecision));
+    const recoveryUpdates = Array.from({ length: 4 }, () => applyDecision(quietDecision));
+    const resumedEvidence = applyDecision(mediaDecision);
+    const resumedThreshold = applyDecision(mediaDecision);
     const afterThreshold = {
-      ...threeSecondUpdates.at(-1),
+      ...resumedThreshold,
       durationOutput: document.querySelector('#study-voice-limit-value').textContent.trim(),
       sceneRunning: state.sceneRunning,
     };
@@ -1142,6 +1181,10 @@ try {
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
     };
+    applyDecision(mediaDecision);
+    applyDecision(mediaDecision);
+    const fullRecoveryUpdates = Array.from({ length: 5 }, () => applyDecision(quietDecision));
+    duration.dispatchEvent(new Event('input', { bubbles: true }));
     const fifteenSecondUpdates = Array.from({ length: 15 }, () => applyDecision(mediaDecision));
     const beforeNewDuration = fifteenSecondUpdates.at(-1);
     const afterNewDuration = applyDecision(mediaDecision);
@@ -1150,10 +1193,12 @@ try {
       quietEvidence: quietDecision.mediaEvidence,
       firstEvidence,
       secondEvidence,
-      clearedByQuiet,
-      threeSecondUpdates,
+      recoveryUpdates,
+      resumedEvidence,
+      resumedThreshold,
       afterThreshold,
       afterDurationChange,
+      fullRecoveryUpdates,
       beforeNewDuration,
       afterNewDuration,
     };
@@ -1166,13 +1211,15 @@ try {
     && report.preflightClassification.secondEvidence.voiceChip === '疑似媒体声音 1.0 秒'
     && report.preflightClassification.secondEvidence.status === '已累计疑似媒体声音 1.0 秒。',
   `Study preflight did not update continuous classifier evidence in real time: ${JSON.stringify(report.preflightClassification)}`);
-  assert(report.preflightClassification.clearedByQuiet.quietResult.suspectedSpeechMs === 0
-    && report.preflightClassification.clearedByQuiet.detector.rawEvidenceMs === 0
-    && report.preflightClassification.clearedByQuiet.voiceChip === '安静'
-    && report.preflightClassification.clearedByQuiet.status === '当前没有达到提醒条件。',
-  `A quiet classifier result did not clear accumulated study evidence: ${JSON.stringify(report.preflightClassification)}`);
-  assert(JSON.stringify(report.preflightClassification.threeSecondUpdates.map((item) => item.quietResult.suspectedSpeechMs))
-      === JSON.stringify([0, 1_000, 2_000, 0])
+  assert(JSON.stringify(report.preflightClassification.recoveryUpdates.map((item) => item.quietResult.suspectedSpeechMs))
+      === JSON.stringify([1_000, 1_000, 1_000, 1_000])
+    && JSON.stringify(report.preflightClassification.recoveryUpdates.map((item) => item.quietResult.evidenceGapMs))
+      === JSON.stringify([1_000, 2_000, 3_000, 4_000])
+    && report.preflightClassification.recoveryUpdates.every((item) => item.voiceChip === '正在确认恢复')
+    && report.preflightClassification.resumedEvidence.quietResult.suspectedSpeechMs === 2_000
+    && !report.preflightClassification.resumedEvidence.snapshot.preflightThresholdReached,
+  `Short normal gaps did not preserve the study-media candidate: ${JSON.stringify(report.preflightClassification)}`);
+  assert(report.preflightClassification.resumedThreshold.quietResult.violated
     && report.preflightClassification.afterThreshold.snapshot.preflightThresholdReached
     && report.preflightClassification.afterThreshold.status === '按当前设置将触发提醒。'
     && report.preflightClassification.afterThreshold.voiceChip === '已达到提醒条件'
@@ -1197,6 +1244,15 @@ try {
     && report.preflightClassification.afterNewDuration.detector.suspectedSpeechMs === 0
     && report.preflightClassification.afterNewDuration.status === '按当前设置将触发提醒。',
   `Changing the preflight duration preserved stale evidence or ignored the new duration: ${JSON.stringify(report.preflightClassification)}`);
+  assert(JSON.stringify(report.preflightClassification.fullRecoveryUpdates.map((item) => item.quietResult.suspectedSpeechMs))
+      === JSON.stringify([1_000, 1_000, 1_000, 1_000, 0])
+    && JSON.stringify(report.preflightClassification.fullRecoveryUpdates.map((item) => item.quietResult.evidenceGapMs))
+      === JSON.stringify([1_000, 2_000, 3_000, 4_000, 0])
+    && report.preflightClassification.fullRecoveryUpdates.slice(0, 4)
+      .every((item) => item.voiceChip === '正在确认恢复')
+    && report.preflightClassification.fullRecoveryUpdates.at(-1).voiceChip === '安静'
+    && report.preflightClassification.fullRecoveryUpdates.at(-1).status === '当前没有达到提醒条件。',
+  `Five continuous normal seconds did not clear the study-media candidate: ${JSON.stringify(report.preflightClassification.fullRecoveryUpdates)}`);
 
   report.preflightStopped = await main.evaluate(`(async () => {
     const stream = window.__gumStreams[0];
@@ -1401,15 +1457,14 @@ try {
     pollMicrophone();
     const detailMeter = document.querySelector('.meter-wrap .meter');
     const liveMeter = document.querySelector('#live-meter');
-    const detailThreshold = document.querySelector('#volume-threshold');
-    const liveThreshold = document.querySelector('#live-volume-threshold');
     return {
       detailAria: detailMeter.getAttribute('aria-valuenow'),
       liveAria: liveMeter.getAttribute('aria-valuenow'),
       detailBar: document.querySelector('#volume-bar').style.width,
       liveBar: document.querySelector('#live-volume-bar').style.width,
-      detailThresholdHidden: detailThreshold.hidden && getComputedStyle(detailThreshold).display === 'none',
-      liveThresholdHidden: liveThreshold.hidden && getComputedStyle(liveThreshold).display === 'none',
+      thresholdControlsAbsent: !document.querySelector('#volume-threshold')
+        && !document.querySelector('#live-volume-threshold')
+        && !document.querySelector('#voice-threshold-input'),
       hasVad: Boolean(state.vad),
       stripVisible: ${layoutExpression}.stripVisible,
     };
@@ -1418,10 +1473,9 @@ try {
     report.failures.push(`Meter aria values are not synchronized: ${JSON.stringify(report.meters)}`);
   }
   assert(report.meters.detailBar === '37%' && report.meters.liveBar === '37%'
-    && report.meters.detailThresholdHidden
-    && report.meters.liveThresholdHidden
+    && report.meters.thresholdControlsAbsent
     && !report.meters.hasVad,
-  `Study raw-volume meters or hidden threshold markers are inconsistent: ${JSON.stringify(report.meters)}`);
+  `Study raw-volume meters or removed threshold controls are inconsistent: ${JSON.stringify(report.meters)}`);
   assert(report.meters.stripVisible, 'Live voice strip disappeared during active detection');
 
   report.studyRestStarted = await main.evaluate(`(() => {
@@ -1630,7 +1684,7 @@ try {
     return window.__beishuTest.startPreflightTest();
   })()`);
   await completePreflightCalibration(main);
-  report.recitePreflightGrace = await main.evaluate(`(() => {
+  report.recitePreflightGrace = await main.evaluate(`(async () => {
     state.vad.process = () => ${forcedVadResult};
     const alerts = state.alerts;
     const lives = state.lives;
@@ -1651,12 +1705,14 @@ try {
     const duration = document.querySelector('#silence-limit-input');
     duration.value = '20';
     duration.dispatchEvent(new Event('input', { bubbles: true }));
+    await saveSettings();
+    const persistedSettings = await window.desktopAPI.getStudySettings();
     const afterSettingChange = {
       snapshot: window.__beishuTest.getSnapshot(),
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
       silentForMs: Date.now() - state.silentSince,
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).reciteSilenceSeconds,
+      persisted: persistedSettings.settings.reciteSilenceSeconds,
     };
     pollMicrophone();
     const afterNextPoll = {
@@ -1772,7 +1828,8 @@ try {
   }
   assert(report.earned.runtime.webContentsId === mainWebContentsId
     && report.earned.runtime.windowCount === 2, 'Break prompt replaced the main webContents or duplicated windows');
-  assert(report.earnedPrompt.kind === 'earned' && report.earnedPrompt.earnedVisible
+  assert(report.earnedPrompt.title === '凛冬督学局 · 休息券'
+    && report.earnedPrompt.kind === 'earned' && report.earnedPrompt.earnedVisible
     && report.earnedPrompt.restingHidden && report.earnedPrompt.credits.includes('1'),
   `Earned prompt content is wrong: ${JSON.stringify(report.earnedPrompt)}`);
   assert(Math.abs(report.earnedPrompt.innerWidth - 420) <= 8
@@ -2040,7 +2097,6 @@ try {
       await window.desktop.hideBreakPrompt().catch(() => {});
       await window.desktopAPI.deleteSpeakerProfile().catch(() => {});
       await refreshSpeakerState().catch(() => {});
-      localStorage.removeItem('red-watch-study-settings-v1');
       await Promise.all((window.__testAudioContexts || []).map((context) => context.close().catch(() => {})));
       setTimeout(() => window.desktopAPI.quitApp(), 50);
       return true;

@@ -10,6 +10,8 @@ function subscribe(channel, callback) {
 contextBridge.exposeInMainWorld('desktopAPI', {
   getBackgroundPreference: () => ipcRenderer.invoke('background-preference:get'),
   setBackgroundPreference: (mode) => ipcRenderer.invoke('background-preference:set', { mode }),
+  getStudySettings: () => ipcRenderer.invoke('study-settings:get'),
+  setStudySettings: (payload) => ipcRenderer.invoke('study-settings:set', payload),
   hideToBackground: (mode) => ipcRenderer.invoke('hide-to-background', { mode }),
   minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggle-maximize'),

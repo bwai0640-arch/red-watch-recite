@@ -366,7 +366,7 @@ try {
   }))()`);
   console.error('[adversarial] initial report', JSON.stringify(report.initial));
   assert(report.initial.session === '待命' && report.initial.startText === '开始学习', 'App does not open at 开始学习');
-  assert(report.initial.title === '背书自习监督', 'Product title was not renamed');
+  assert(report.initial.title === '凛冬督学局', 'Product title was not renamed');
   assert(report.initial.timer === '00:00', 'Initial timer is not zero');
   assert(report.initial.clip === 'E1_enter_walk' && report.initial.frame === '0' && report.initial.playback === 'held', 'Initial empty-room frame is wrong');
   assert(report.initial.alertHidden, 'Reminder is visible before Start');
@@ -740,9 +740,11 @@ try {
     window.__canvasObserver?.disconnect();
     if (window.__originalClearRect) CanvasRenderingContext2D.prototype.clearRect = window.__originalClearRect;
     Promise.all((window.__testAudioContexts || []).map((context) => context.close().catch(() => {})));
-    window.desktopAPI.deleteSpeakerProfile().catch(() => {}).finally(() => {
-      setTimeout(() => window.desktopAPI.quitApp(), 50);
-    });
+    window.desktopAPI.getSpeakerState().then(async (profileState) => {
+      for (const profile of profileState?.profiles || []) {
+        await window.desktopAPI.deleteSpeakerProfile(profile.id).catch(() => {});
+      }
+    }).catch(() => {}).finally(() => setTimeout(() => window.desktopAPI.quitApp(), 50));
     return true;
   })()`).catch(() => {});
   await wait(500);

@@ -619,10 +619,14 @@ class SpeakerService {
     return this.runExclusive(async () => {
       this.assertOperational();
       this.enrollment = null;
-      if (!this.profile) return this.getState();
-      const removeAll = typeof profileId !== 'string' || !profileId;
-      const remaining = removeAll ? [] : this.profile.profiles.filter((item) => item.id !== profileId);
-      if (!removeAll && remaining.length === this.profile.profiles.length) {
+      if (typeof profileId !== 'string' || !/^[a-f0-9-]{8,64}$/iu.test(profileId)) {
+        throw new SpeakerServiceError('PROFILE_ID_INVALID', '请选择要删除的有效声纹。');
+      }
+      if (!this.profile) {
+        throw new SpeakerServiceError('PROFILE_NOT_FOUND', '未找到要删除的声纹。');
+      }
+      const remaining = this.profile.profiles.filter((item) => item.id !== profileId);
+      if (remaining.length === this.profile.profiles.length) {
         throw new SpeakerServiceError('PROFILE_NOT_FOUND', '未找到要删除的声纹。');
       }
       try {

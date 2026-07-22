@@ -240,7 +240,10 @@ try {
 
   await evaluate(`(async () => {
     await stopSession(false, true);
-    await window.desktopAPI.deleteSpeakerProfile();
+    const profileState = await window.desktopAPI.getSpeakerState();
+    for (const profile of profileState.profiles || []) {
+      await window.desktopAPI.deleteSpeakerProfile(profile.id);
+    }
     await refreshSpeakerState();
     return true;
   })()`);
@@ -250,7 +253,10 @@ try {
 } finally {
   await evaluate(`(async () => {
     await stopSession(false, true).catch(() => {});
-    await window.desktopAPI.deleteSpeakerProfile().catch(() => {});
+    const profileState = await window.desktopAPI.getSpeakerState().catch(() => null);
+    for (const profile of profileState?.profiles || []) {
+      await window.desktopAPI.deleteSpeakerProfile(profile.id).catch(() => {});
+    }
     await Promise.all((window.__testAudioContexts || []).map((context) => context.close().catch(() => {})));
     setTimeout(() => window.desktopAPI.quitApp(), 50);
     return true;

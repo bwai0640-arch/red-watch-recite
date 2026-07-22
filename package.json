@@ -1,7 +1,7 @@
 {
   "name": "red-watch-recite",
-  "version": "1.12.0",
-  "description": "背书自习监督：本地背书与安静自习监督桌面应用",
+  "version": "1.13.0",
+  "description": "凛冬督学局：本地背书与安静自习监督桌面应用",
   "main": "main.js",
   "author": "原作：叛逆蓝牙 · 二创：眼泪斷了线",
   "license": "UNLICENSED",
@@ -10,7 +10,9 @@
     "start": "electron .",
     "dist": "electron-builder --win nsis",
     "dist:installer": "electron-builder --win nsis",
-    "test:window-modes": "node scripts/window-mode-policy-test.cjs && node scripts/floating-window-source-test.cjs"
+    "test:window-modes": "node scripts/window-mode-policy-test.cjs && node scripts/floating-window-source-test.cjs",
+    "test:adversarial": "node scripts/adversarial-user-simulation-test.cjs",
+    "test:settings": "node scripts/study-settings-policy-test.cjs && node scripts/study-settings-source-test.cjs"
   },
   "dependencies": {
     "sherpa-onnx-node": "1.13.4"
@@ -21,7 +23,7 @@
   },
   "build": {
     "appId": "top.redwatch.study-supervisor",
-    "productName": "背书自习监督",
+    "productName": "凛冬督学局",
     "electronDist": "node_modules/electron/dist",
     "asar": true,
     "directories": {
@@ -30,6 +32,7 @@
     "files": [
       "main.js",
       "window-mode-policy.js",
+      "study-settings-policy.js",
       "cache-cleanup.js",
       "preload.js",
       "profile-crypto.js",
@@ -62,7 +65,7 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "artifactName": "背书自习监督-安装版-${version}.exe"
+      "artifactName": "凛冬督学局-安装版-${version}.exe"
     },
     "nsis": {
       "oneClick": false,
@@ -70,7 +73,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "背书自习监督",
+      "shortcutName": "凛冬督学局",
       "deleteAppDataOnUninstall": false
     }
   }

@@ -9,7 +9,7 @@ assert.equal(constants.VERIFICATION_THRESHOLD, 0.55);
 assert.equal(constants.STRONG_MATCH_THRESHOLD, 0.70);
 
 const root = path.resolve(__dirname, '..');
-const dataRoot = path.join(root, 'work', 'speaker-service-test-data');
+const dataRoot = path.join(root, 'work', `speaker-service-test-data-${process.pid}`);
 const fixtures = path.join(root, 'work', 'speaker-fixtures');
 const modelPath = path.join(root, 'models', '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx');
 const workerPath = path.join(root, 'speaker-worker.js');
@@ -118,6 +118,22 @@ async function run() {
   assert.equal((await reloaded.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
   assert.equal((await reloaded.verify(wave('leijun-test-sr-1.wav'))).matched, false);
 
+  const profilePath = path.join(dataRoot, 'speaker-profile.dat');
+  const beforeInvalidDelete = await fsp.readFile(profilePath);
+  for (const invalidProfileId of [undefined, null, '', '   ', '../speaker-profile.dat', 'not-a-uuid']) {
+    await assert.rejects(
+      () => reloaded.deleteProfile(invalidProfileId),
+      /有效声纹/,
+    );
+    assert.deepEqual(await fsp.readFile(profilePath), beforeInvalidDelete);
+    assert.equal(reloaded.getState().profileCount, 3);
+  }
+  await assert.rejects(
+    () => reloaded.deleteProfile('00000000-0000-4000-8000-000000000099'),
+    /未找到要删除的声纹/,
+  );
+  assert.deepEqual(await fsp.readFile(profilePath), beforeInvalidDelete);
+
   await reloaded.deleteProfile(state.profiles[0].id);
   state = reloaded.getState();
   assert.equal(state.profileCount, 2);
@@ -152,7 +168,9 @@ async function run() {
   assert.equal(state.profileExists, false);
   assert.ok(state.error);
   assert.equal((await corrupted.verify(wave('fangjun-test-sr-1.wav'))).matched, false);
-  await corrupted.deleteProfile();
+  const corruptProfileBeforeRejectedDelete = await fsp.readFile(profilePath);
+  await assert.rejects(() => corrupted.deleteProfile(), /有效声纹/);
+  assert.deepEqual(await fsp.readFile(profilePath), corruptProfileBeforeRejectedDelete);
   await corrupted.dispose();
   await fsp.rm(dataRoot, { recursive: true, force: true });
 
@@ -166,6 +184,7 @@ async function run() {
     profileReloaded: true,
     contaminatedCandidatesDropped: true,
     multipleProfilesRetained: true,
+    invalidProfileDeleteRejected: true,
     legacyProfileMigratedInMemory: true,
     corruptProfileFailedClosed: true,
   }));

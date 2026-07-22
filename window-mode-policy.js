@@ -78,8 +78,19 @@ function clamp(value, minimum, maximum) {
 }
 
 function clampFloatingBounds(bounds, workArea, size) {
-  const width = Math.min(size.width, workArea.width);
-  const height = Math.min(size.height, workArea.height);
+  const minimumSize = arguments[3] || size;
+  const rawWidth = Number(bounds?.width);
+  const rawHeight = Number(bounds?.height);
+  const width = clamp(
+    Math.round(Number.isFinite(rawWidth) ? rawWidth : size.width),
+    Math.min(minimumSize.width, workArea.width),
+    Math.min(size.width, workArea.width),
+  );
+  const height = clamp(
+    Math.round(Number.isFinite(rawHeight) ? rawHeight : size.height),
+    Math.min(minimumSize.height, workArea.height),
+    Math.min(size.height, workArea.height),
+  );
   const rawX = Number(bounds?.x);
   const rawY = Number(bounds?.y);
   return {
@@ -95,6 +106,27 @@ function clampFloatingBounds(bounds, workArea, size) {
     ),
     width,
     height,
+  };
+}
+
+function normalizeFloatingWindowSize(value, {
+  defaultSize = { width: 320, height: 225 },
+  minimumSize = defaultSize,
+  maximumSize = defaultSize,
+} = {}) {
+  const width = Number(value?.width);
+  const height = Number(value?.height);
+  return {
+    width: clamp(
+      Math.round(Number.isFinite(width) ? width : defaultSize.width),
+      minimumSize.width,
+      maximumSize.width,
+    ),
+    height: clamp(
+      Math.round(Number.isFinite(height) ? height : defaultSize.height),
+      minimumSize.height,
+      maximumSize.height,
+    ),
   };
 }
 
@@ -127,31 +159,65 @@ function floatingWindowBounds(workArea, {
   };
 }
 
-function readBackgroundPreference(filePath) {
+function readPreferenceDocument(filePath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-    return normalizeBackgroundMode(parsed?.backgroundMode);
+    return isPlainObject(parsed) ? parsed : {};
   } catch {
-    return DEFAULT_BACKGROUND_MODE;
+    return {};
   }
 }
 
-async function writeBackgroundPreference(filePath, mode) {
-  const backgroundMode = normalizeBackgroundMode(mode);
+function readBackgroundPreference(filePath) {
+  return normalizeBackgroundMode(readPreferenceDocument(filePath).backgroundMode);
+}
+
+function readFloatingWindowSize(filePath, options) {
+  return normalizeFloatingWindowSize(
+    readPreferenceDocument(filePath).floatingWindowSize,
+    options,
+  );
+}
+
+async function writePreferenceDocument(filePath, updates) {
+  const current = readPreferenceDocument(filePath);
+  const backgroundMode = normalizeBackgroundMode(
+    Object.hasOwn(updates, 'backgroundMode') ? updates.backgroundMode : current.backgroundMode,
+  );
+  const floatingWindowSize = Object.hasOwn(updates, 'floatingWindowSize')
+    ? updates.floatingWindowSize
+    : current.floatingWindowSize;
+  const storedSize = floatingWindowSize && Number.isFinite(Number(floatingWindowSize.width))
+    && Number.isFinite(Number(floatingWindowSize.height))
+    ? {
+      width: Math.max(1, Math.round(Number(floatingWindowSize.width))),
+      height: Math.max(1, Math.round(Number(floatingWindowSize.height))),
+    }
+    : null;
   const directory = path.dirname(filePath);
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fsPromises.mkdir(directory, { recursive: true });
   try {
+    const document = { backgroundMode };
+    if (storedSize) document.floatingWindowSize = storedSize;
     await fsPromises.writeFile(
       temporaryPath,
-      `${JSON.stringify({ backgroundMode }, null, 2)}\n`,
+      `${JSON.stringify(document, null, 2)}\n`,
       { encoding: 'utf8', mode: 0o600 },
     );
     await fsPromises.rename(temporaryPath, filePath);
   } finally {
     await fsPromises.rm(temporaryPath, { force: true }).catch(() => {});
   }
-  return { backgroundMode };
+  return { backgroundMode, floatingWindowSize: storedSize };
+}
+
+async function writeBackgroundPreference(filePath, mode) {
+  return writePreferenceDocument(filePath, { backgroundMode: mode });
+}
+
+async function writeFloatingWindowSize(filePath, size) {
+  return writePreferenceDocument(filePath, { floatingWindowSize: size });
 }
 
 module.exports = {
@@ -161,10 +227,13 @@ module.exports = {
   clampFloatingBounds,
   floatingWindowBounds,
   normalizeBackgroundMode,
+  normalizeFloatingWindowSize,
   readBackgroundPreference,
+  readFloatingWindowSize,
   resolveAlertReturnMode,
   validateBackgroundModePayload,
   validateFinishAlertPayload,
   validateWindowModeReadyPayload,
   writeBackgroundPreference,
+  writeFloatingWindowSize,
 };

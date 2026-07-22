@@ -1,6 +1,6 @@
 # Third-party notices
 
-`背书自习监督` uses the following components for local speaker verification and local audio-event tagging:
+`凛冬督学局` uses the following components for local speaker verification and local audio-event tagging:
 
 - `sherpa-onnx-node` 1.13.4, Copyright the Next-gen Kaldi contributors, Apache License 2.0.
   Source: https://github.com/k2-fsa/sherpa-onnx

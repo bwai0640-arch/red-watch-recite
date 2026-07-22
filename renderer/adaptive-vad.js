@@ -4,6 +4,10 @@
   else root.AdaptiveVad = api;
 }(typeof globalThis === 'object' ? globalThis : this, () => {
   const clamp = (value, minimum, maximum) => Math.min(maximum, Math.max(minimum, value));
+  // Speaker verification is the final recite decision, so this front gate is
+  // deliberately recall-oriented. A loud first three seconds must not teach
+  // the detector that the learner's own voice is background noise.
+  const MAX_AUTOMATIC_NOISE_FLOOR_DB = -50;
 
   function median(values) {
     if (!values.length) return -100;
@@ -28,6 +32,7 @@
 
     reset() {
       this.calibration = [];
+      this.calibrationLikelySpeechFrames = 0;
       this.noiseFloorDb = -65;
       this.calibrated = false;
       this.levelHistory = [];
@@ -48,9 +53,18 @@
       const flatness = clamp(Number(feature.flatness) || 0, 0, 1);
 
       if (!this.calibrated) {
+        const calibrationAmplitudeChange = Math.abs(db - this.previousDb);
+        const calibrationLikelySpeech = voiceRatio >= 0.62
+          && (flux >= 0.07 || calibrationAmplitudeChange >= 3);
         this.calibration.push(db);
+        if (calibrationLikelySpeech) this.calibrationLikelySpeechFrames += 1;
         if (this.calibration.length >= this.calibrationFrames) {
-          this.noiseFloorDb = median(this.calibration);
+          const likelySpeechRatio = this.calibrationLikelySpeechFrames / this.calibration.length;
+          const measuredNoiseFloorDb = median(this.calibration);
+          this.noiseFloorDb = Math.min(
+            measuredNoiseFloorDb,
+            likelySpeechRatio >= 0.35 ? MAX_AUTOMATIC_NOISE_FLOOR_DB : measuredNoiseFloorDb,
+          );
           this.calibrated = true;
           this.levelHistory = this.calibration.slice(-12);
           this.fluxHistory = Array(this.levelHistory.length).fill(0);
@@ -89,10 +103,11 @@
       const amplitudeChange = Math.abs(db - this.previousDb);
       const hasVoiceBandEnergy = voiceRatio >= 0.42;
       const hasSpeechMovement = flux >= 0.035 || amplitudeChange >= 1.6;
+      const strongVoicePattern = voiceRatio >= 0.62 && flux >= 0.07;
       const evidence = !steadyNoise
-        && levelDelta >= this.sensitivityDb
         && hasVoiceBandEnergy
-        && hasSpeechMovement;
+        && hasSpeechMovement
+        && (levelDelta >= this.sensitivityDb || strongVoicePattern);
 
       if (evidence) this.speechScore = Math.min(8, this.speechScore + 2);
       else this.speechScore = Math.max(0, this.speechScore - 1);
@@ -130,5 +145,10 @@
     }
   }
 
-  return { AdaptiveVoiceDetector, median, standardDeviation };
+  return {
+    AdaptiveVoiceDetector,
+    MAX_AUTOMATIC_NOISE_FLOOR_DB,
+    median,
+    standardDeviation,
+  };
 }));
