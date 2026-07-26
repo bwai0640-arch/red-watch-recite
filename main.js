@@ -101,6 +101,7 @@ let runtimeSession = null;
 let inlineAlertSequence = 0;
 let inlineAlertState = null;
 let floatingRestoreBounds = null;
+let floatingManualMovePending = false;
 let floatingPreferredSize = null;
 let mainWindowSkipsTaskbar = false;
 let windowModeTransitionSequence = 0;
@@ -505,24 +506,20 @@ function createMainWindow() {
   mainWindow.on('maximize', sendWindowMaximized);
   mainWindow.on('unmaximize', sendWindowMaximized);
   mainWindow.on('minimize', () => sendWindowMode(mainWindowMode, { minimized: true }));
-  mainWindow.on('will-move', (event, nextBounds) => {
-    if (mainWindowMode !== 'floating') return;
-    const display = screen.getDisplayMatching(nextBounds);
-    floatingRestoreBounds = clampFloatingBounds(
-      nextBounds,
-      display.workArea,
-      floatingWindowSize,
-      floatingWindowMinimumSize,
-    );
-    if (
-      floatingRestoreBounds.x !== nextBounds.x
-      || floatingRestoreBounds.y !== nextBounds.y
-      || floatingRestoreBounds.width !== nextBounds.width
-      || floatingRestoreBounds.height !== nextBounds.height
-    ) {
-      event.preventDefault();
-      mainWindow.setBounds(floatingRestoreBounds, false);
+  mainWindow.on('will-move', () => {
+    if (mainWindowMode === 'floating') floatingManualMovePending = true;
+  });
+  mainWindow.on('moved', () => {
+    if (mainWindowMode !== 'floating') {
+      floatingManualMovePending = false;
+      return;
     }
+    if (!floatingManualMovePending) return;
+    floatingManualMovePending = false;
+    // Read the final native bounds after a manual drag. Intercepting
+    // `will-move` made Windows dragging feel sticky and could reapply a stale
+    // pre-resize width/height. Recording only never changes the user's size.
+    floatingRestoreBounds = { ...mainWindow.getBounds() };
   });
   mainWindow.on('will-resize', (event, nextBounds) => {
     if (mainWindowMode !== 'floating') return;

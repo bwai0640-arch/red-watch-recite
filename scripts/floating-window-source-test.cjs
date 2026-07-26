@@ -148,6 +148,9 @@ assert.match(mainSource, /ipcMain\.on\('window-mode-ready'/);
 assert.match(mainSource, /ipcMain\.handle\('force-restore-scene-mode'/);
 assert.match(mainSource, /contents\.send\('window-close-requested'\)/);
 assert.match(mainSource, /mainWindow\.on\('will-move'/);
+assert.match(mainSource, /mainWindow\.on\('moved',[\s\S]*?floatingRestoreBounds = \{ \.\.\.mainWindow\.getBounds\(\) \}/);
+assert.match(mainSource, /mainWindow\.on\('will-move', \(\) => \{\s*if \(mainWindowMode === 'floating'\)/);
+assert.doesNotMatch(mainSource, /mainWindow\.on\('will-move', \(event/);
 assert.match(mainSource, /mainWindow\.on\('will-resize'/);
 assert.match(mainSource, /mainWindow\.on\('resize'/);
 assert.match(mainSource, /mainWindow\.on\('resized'/);
@@ -166,6 +169,7 @@ assert.doesNotMatch(preloadSource, /ipcRenderer\.send\([^)]*floating/);
 
 const floatingMarkup = htmlSource.match(/<section id="floating-statusbar"[\s\S]*?<\/section>/)?.[0] || '';
 assert.match(floatingMarkup, /id="floating-voice-state"/);
+assert.match(floatingMarkup, /id="floating-anomaly-time"[^>]*>未确认本人 0 秒</);
 assert.match(floatingMarkup, /id="floating-timer"/);
 assert.match(floatingMarkup, /id="floating-hide-button"/);
 assert.match(floatingMarkup, /id="floating-expand-button"/);
@@ -200,6 +204,12 @@ assert.match(cssSource, /\.background-action\.menu-open \.background-action-menu
 assert.match(cssSource, /#background-button:disabled \+ \.background-action-menu\s*\{ display: none; \}/);
 
 assert.match(appSource, /UI\.floatingVoiceState\.textContent = text/);
+assert.match(appSource, /function renderFloatingAnomaly\(\)[\s\S]*?异常声音 \$\{seconds\} 秒[\s\S]*?未确认本人 \$\{seconds\} 秒/);
+assert.match(appSource, /quietResult\.violated \? quietResult\.violationThresholdMs : quietResult\.suspectedSpeechMs/);
+assert.match(appSource, /const silentForMs = Date\.now\(\) - state\.silentSince;\s*setFloatingAnomalyDuration\(silentForMs\)/);
+assert.match(appSource, /if \(confirmed\) \{[\s\S]*?setFloatingAnomalyDuration\(0\)/);
+assert.match(cssSource, /\.floating-anomaly-time\s*\{/);
+assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-(?:voice-state|anomaly-time)[^{]*\{[^}]*opacity:\s*0/);
 assert.match(appSource, /UI\.floatingTimer\.textContent = `已学习 \$\{elapsed\}`/);
 assert.match(appSource, /hideWindowFromChrome\('hidden'\)/);
 assert.match(appSource, /restoreSceneMode\(\)/);

@@ -24,6 +24,16 @@ function wave(name) {
   return { samples: result.samples, sampleRate: result.sampleRate };
 }
 
+function waveSegment(name, startSeconds, durationSeconds) {
+  const result = wave(name);
+  const start = Math.round(result.sampleRate * startSeconds);
+  const end = start + Math.round(result.sampleRate * durationSeconds);
+  return {
+    samples: result.samples.slice(start, end),
+    sampleRate: result.sampleRate,
+  };
+}
+
 function syntheticFan() {
   const sampleRate = 16_000;
   const samples = new Float32Array(Math.round(sampleRate * 2.4));
@@ -78,10 +88,17 @@ async function run() {
 
   const owner = await service.verify(wave('fangjun-test-sr-1.wav'));
   const other = await service.verify(wave('leijun-test-sr-1.wav'));
+  const ownerQuick = await service.verify(waveSegment('fangjun-test-sr-1.wav', 0, 2));
+  const otherQuick = await service.verify(waveSegment('leijun-test-sr-1.wav', 0, 2));
   assert.equal(owner.matched, true);
   assert.equal(other.matched, false);
   assert.ok(owner.score >= owner.threshold);
   assert.ok(other.score < other.threshold);
+  assert.ok(
+    ownerQuick.score >= 0.74,
+    `known owner must clear the strict two-second fast path (score=${ownerQuick.score})`,
+  );
+  assert.ok(otherQuick.score < 0.74, 'known other speaker must not clear the fast path');
 
   const files = await fsp.readdir(dataRoot);
   assert.deepEqual(files, ['speaker-profile.dat']);
@@ -177,6 +194,8 @@ async function run() {
   console.log(JSON.stringify({
     ownerScore: Number(owner.score.toFixed(3)),
     otherScore: Number(other.score.toFixed(3)),
+    ownerQuickScore: Number(ownerQuick.score.toFixed(3)),
+    otherQuickScore: Number(otherQuick.score.toFixed(3)),
     threshold: owner.threshold,
     rawAudioPersisted: false,
     importSourceRejected: true,

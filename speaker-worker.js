@@ -4,7 +4,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parentPort, workerData } = require('node:worker_threads');
 
-const OWNER_NAME = 'owner';
 const MIN_SAMPLE_RATE = 8_000;
 const MAX_SAMPLE_RATE = 96_000;
 const MIN_SAMPLE_SECONDS = 0.75;
@@ -18,7 +17,6 @@ const MIN_ENROLLMENT_DB_STD = 2;
 const MIN_ENROLLMENT_DB_SPREAD = 6;
 
 let extractor = null;
-let manager = null;
 let enrolledProfiles = [];
 let initializationError = null;
 
@@ -186,25 +184,21 @@ function setProfiles(payload) {
     const embeddings = profile.embeddings.map(validateEmbedding);
     return { id: profile.id, embeddings, centroid: centroid(embeddings) };
   });
-  const nextManager = new (require('sherpa-onnx-node').SpeakerEmbeddingManager)(extractor.dim);
-  const allEmbeddings = profiles.flatMap((profile) => profile.embeddings);
-  if (!nextManager.addMulti({ name: OWNER_NAME, v: allEmbeddings })) {
-    throw serviceError('PROFILE_LOAD_FAILED', '无法载入本人声纹。');
-  }
-  manager = nextManager;
   enrolledProfiles = profiles;
-  return { count: profiles.length, samples: allEmbeddings.length };
+  return {
+    count: profiles.length,
+    samples: profiles.reduce((total, profile) => total + profile.embeddings.length, 0),
+  };
 }
 
 function clearProfile() {
-  manager = null;
   enrolledProfiles = [];
   return { cleared: true };
 }
 
 function verify(payload) {
   ensureInitialized();
-  if (!manager || !enrolledProfiles.length) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
+  if (!enrolledProfiles.length) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
   const threshold = Number(payload?.threshold);
   const strongThreshold = Number(payload?.strongThreshold);
   if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1
@@ -219,8 +213,11 @@ function verify(payload) {
   })).sort((left, right) => right.score - left.score);
   const bestProfile = scoredProfiles[0];
   const score = bestProfile.score;
-  const managerMatched = manager.verify({ name: OWNER_NAME, v: embedding, threshold });
-  const matched = Boolean(managerMatched && score >= threshold);
+  // Each saved profile represents the same user in a particular microphone or
+  // environment. Averaging every profile into one global vector can dilute a
+  // valid best-profile match, so use the best quality-checked profile without
+  // lowering either identity threshold.
+  const matched = score >= threshold;
   return {
     matched,
     score,

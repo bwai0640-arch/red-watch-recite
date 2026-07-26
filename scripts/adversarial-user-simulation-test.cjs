@@ -435,10 +435,12 @@ function runStaticAdversary() {
   assert.match(mainSource, /setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)/);
   assert.match(mainSource, /function showFloatingWindowNow\([\s\S]*?setResizable\(true\)/);
   assert.match(mainSource, /mainWindow\.on\('resized',[\s\S]*?persistFloatingWindowSize\(\)/);
-  assert.match(
-    mainSource,
-    /mainWindow\.on\('will-move', \(event, nextBounds\)[\s\S]*?event\.preventDefault\(\);[\s\S]*?mainWindow\.setBounds\(floatingRestoreBounds, false\)/,
-  );
+  assert.match(mainSource, /mainWindow\.on\('moved',[\s\S]*?floatingRestoreBounds = \{ \.\.\.mainWindow\.getBounds\(\) \}/);
+  assert.match(mainSource, /mainWindow\.on\('will-move', \(\) => \{\s*if \(mainWindowMode === 'floating'\)/);
+  assert.doesNotMatch(mainSource, /mainWindow\.on\('will-move', \(event/);
+  assert.match(htmlSource, /id="floating-anomaly-time"[^>]*>未确认本人 0 秒</);
+  assert.match(appSource, /function renderFloatingAnomaly\(\)[\s\S]*?异常声音 \$\{seconds\} 秒[\s\S]*?未确认本人 \$\{seconds\} 秒/);
+  assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-(?:voice-state|anomaly-time)[^{]*\{[^}]*opacity:\s*0/);
   assert.match(mainSource, /let backgroundPreferenceWriteChain = Promise\.resolve\(\)/);
   assert.match(mainSource, /function persistFloatingWindowSize\(\)[\s\S]*?backgroundPreferenceWriteChain[\s\S]*?writeFloatingWindowSize/);
   assert.doesNotMatch(appSource, /floatingVoiceState\.addEventListener\('dblclick'/);
@@ -494,7 +496,7 @@ async function main() {
     scenarios: {
       audio: 22,
       floatingWindow: 10,
-      staticContracts: 23,
+      staticContracts: 25,
     },
   }));
 }

@@ -16,6 +16,7 @@ const UI = {
   windowMaximizeButton: document.querySelector('#window-maximize-button'),
   windowCloseButton: document.querySelector('#window-close-button'),
   floatingVoiceState: document.querySelector('#floating-voice-state'),
+  floatingAnomalyTime: document.querySelector('#floating-anomaly-time'),
   floatingTimer: document.querySelector('#floating-timer'),
   floatingHideButton: document.querySelector('#floating-hide-button'),
   floatingExpandButton: document.querySelector('#floating-expand-button'),
@@ -77,6 +78,8 @@ const MEDIA_CATALOG_URL = 'rwt://renderer/media/catalog.json';
 const LEGACY_SETTINGS_STORAGE_KEY = 'red-watch-study-settings-v1';
 const MICROPHONE_POLL_MS = 100;
 const CALIBRATION_SECONDS = 3;
+const SPEAKER_QUICK_WINDOW_SECONDS = 2;
+const SPEAKER_QUICK_CONFIRM_THRESHOLD = 0.74;
 const SPEAKER_WINDOW_SECONDS = 2.4;
 const SPEAKER_OVERLAP_SECONDS = 0.6;
 const SPEAKER_VERIFY_INTERVAL_MS = 1_200;
@@ -118,6 +121,7 @@ const state = {
   breakPromptPending: false,
   quietDetector: null,
   latestQuietResult: null,
+  floatingAnomalyMs: 0,
   elapsedTimer: null,
   audioTimer: null,
   patrolTimer: null,
@@ -150,6 +154,7 @@ const state = {
   speakerProfileError: '',
   speakerChunks: [],
   speakerSampleCount: 0,
+  speakerQuickProbeCompleted: false,
   speakerVerificationPending: false,
   speakerVerificationGeneration: 0,
   lastSpeakerVerificationAt: 0,
@@ -369,6 +374,19 @@ function violationLimitMs() {
   return violationLimitSeconds() * 1_000;
 }
 
+function renderFloatingAnomaly() {
+  const durationMs = Math.max(0, Number(state.floatingAnomalyMs) || 0);
+  const seconds = Math.floor(durationMs / 1_000);
+  UI.floatingAnomalyTime.textContent = state.mode === 'study'
+    ? `异常声音 ${seconds} 秒`
+    : `未确认本人 ${seconds} 秒`;
+}
+
+function setFloatingAnomalyDuration(durationMs = 0) {
+  state.floatingAnomalyMs = Math.max(0, Number(durationMs) || 0);
+  renderFloatingAnomaly();
+}
+
 function resetDetectionAfterSettingChange() {
   const preflight = isPreflightAudioActive();
   if (!preflight) return;
@@ -383,6 +401,7 @@ function resetDetectionAfterSettingChange() {
     state.silentSince = state.calibrating ? 0 : Date.now();
     state.silenceArmed = !state.calibrating;
   }
+  setFloatingAnomalyDuration(0);
   if (state.calibrating) {
     updatePreflightUi('设置已更新，校准完成后继续测试。');
     return;
@@ -657,6 +676,7 @@ function setMode(mode) {
     stopPreflightTest({ status: '模式已切换，可按新设置重新测试。' }).catch(handleAuxiliaryUiError);
   }
   state.mode = mode;
+  setFloatingAnomalyDuration(0);
   state.milestoneLedger = new POLICY.MilestoneLedger(mode);
   saveSettings();
   updateModeUi();
@@ -1207,6 +1227,7 @@ function armSilenceClock() {
   state.silenceArmed = true;
   state.silentSince = state.mode === 'recite' ? Date.now() : 0;
   state.silencePausedAt = 0;
+  setFloatingAnomalyDuration(0);
   state.quietDetector?.reset();
   if (state.mode === 'study') resetStudyAudioRuntime();
 }
@@ -1490,12 +1511,14 @@ async function releaseMicrophone() {
   state.silenceArmed = false;
   state.silentSince = 0;
   state.silencePausedAt = 0;
+  setFloatingAnomalyDuration(0);
   resetSpeakerRuntime();
   resetStudyAudioRuntime();
   state.microphoneProcessingWarning = '';
 }
 
 function resetIdleDetectionUi() {
+  setFloatingAnomalyDuration(0);
   if (!state.active && !state.startPending && !state.enrollmentOpen && !state.enrollmentPending) {
     setChip(UI.voiceState, state.mode === 'study' ? '等待安静自习' : '未开启');
     UI.voiceStatus.textContent = '未在检测声音';
@@ -2028,11 +2051,13 @@ async function finishPreview() {
 function startElapsedTimer() {
   UI.timer.textContent = '00:00';
   UI.floatingTimer.textContent = '已学习 00:00';
+  setFloatingAnomalyDuration(0);
   stopElapsedTimer();
   state.elapsedTimer = window.setInterval(() => {
     const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
     UI.timer.textContent = elapsed;
     UI.floatingTimer.textContent = `已学习 ${elapsed}`;
+    renderFloatingAnomaly();
     settleStudyMilestones();
   }, 1000);
 }
@@ -2101,6 +2126,7 @@ function resetSpeakerRuntime() {
   state.latestVadSpeech = false;
   state.speakerChunks = [];
   state.speakerSampleCount = 0;
+  state.speakerQuickProbeCompleted = false;
   state.speakerVerificationPending = false;
   state.lastSpeakerVerificationAt = 0;
   state.lastSpeakerDecisionAt = 0;
@@ -2130,6 +2156,9 @@ function renderStudyAudioDecision(quietResult, decision) {
   const candidateActive = quietResult.rawEvidenceMs > 0;
   state.latestQuietResult = quietResult;
   state.latestStudyAudioDecision = decision;
+  setFloatingAnomalyDuration(
+    quietResult.violated ? quietResult.violationThresholdMs : quietResult.suspectedSpeechMs,
+  );
   document.body.dataset.voiceDetected = String(
     decision.mediaEvidence || candidateActive,
   );
@@ -2253,7 +2282,7 @@ function onStudyPcmChunk(chunk) {
   );
 }
 
-async function verifyOwnerVoice(samples, sourceSampleRate) {
+async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false } = {}) {
   if (
     state.speakerVerificationPending
     || !isReciteDetectionActive()
@@ -2290,13 +2319,23 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
     const strongMatch = Boolean(result?.strongMatch);
     const score = Number(result?.score) || 0;
     const threshold = Number(result?.threshold) || 0.55;
+    const quickConfirmed = quickProbe
+      && matched
+      && score >= SPEAKER_QUICK_CONFIRM_THRESHOLD;
+    if (quickProbe && !quickConfirmed) {
+      state.lastSpeakerVerificationAt = 0;
+      document.body.dataset.voiceDetected = 'false';
+      setChip(UI.voiceState, '正在复核本人声音');
+      UI.voiceStatus.textContent = '正在复核本人声音';
+      return;
+    }
     state.speakerMatchHistory.push({ at: now, matched });
     state.speakerMatchHistory = state.speakerMatchHistory
       .filter((item) => now - item.at <= 6_000)
       .slice(-3);
     const recentMatches = state.speakerMatchHistory.filter((item) => item.matched).length;
     const repeatedMatch = matched && recentMatches >= 2;
-    const confirmed = matched && (strongMatch || repeatedMatch);
+    const confirmed = quickConfirmed || (matched && (strongMatch || repeatedMatch));
     state.lastSpeakerDecisionAt = now;
     state.lastSpeakerMatched = confirmed;
     state.lastSpeakerNearMatch = !matched && score >= Math.max(0, threshold - 0.08);
@@ -2312,6 +2351,13 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
       state.lastSpeakerRejected = false;
       state.ownerConfirmedUntil = now + SPEAKER_CONFIRM_HOLD_MS;
       state.silentSince = 0;
+      setFloatingAnomalyDuration(0);
+      if (quickProbe) {
+        state.speakerChunks = [];
+        state.speakerSampleCount = 0;
+        state.speakerQuickProbeCompleted = false;
+        state.lastSpeechChunkAt = 0;
+      }
       document.body.dataset.voiceDetected = 'true';
       setChip(UI.voiceState, '本人正在背书', 'good');
       UI.voiceStatus.textContent = '本人正在背书';
@@ -2352,8 +2398,40 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
     if (verificationTimeout) clearTimeout(verificationTimeout);
     if (generation === state.speakerVerificationGeneration) {
       state.speakerVerificationPending = false;
+      pumpSpeakerVerification(sourceSampleRate);
     }
   }
+}
+
+function pumpSpeakerVerification(sourceSampleRate) {
+  if (!isReciteDetectionActive() || state.speakerVerificationPending) return;
+  const sampleRate = sourceSampleRate
+    || state.audioContext?.sampleRate
+    || SpeakerAudio.TARGET_SAMPLE_RATE;
+  const quickLength = Math.round(sampleRate * SPEAKER_QUICK_WINDOW_SECONDS);
+  const targetLength = Math.round(sampleRate * SPEAKER_WINDOW_SECONDS);
+  if (
+    !state.speakerQuickProbeCompleted
+    && state.speakerSampleCount >= quickLength
+  ) {
+    state.speakerQuickProbeCompleted = true;
+    const quickSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount)
+      .slice(Math.max(0, state.speakerSampleCount - quickLength));
+    verifyOwnerVoice(quickSamples, sampleRate, { quickProbe: true });
+    return;
+  }
+  if (
+    state.speakerSampleCount < targetLength
+    || Date.now() - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
+  ) return;
+
+  const allSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount);
+  const windowSamples = allSamples.slice(Math.max(0, allSamples.length - targetLength));
+  const overlapLength = Math.round(sampleRate * SPEAKER_OVERLAP_SECONDS);
+  const overlap = allSamples.slice(Math.max(0, allSamples.length - overlapLength));
+  state.speakerChunks = overlap.length ? [overlap] : [];
+  state.speakerSampleCount = overlap.length;
+  verifyOwnerVoice(windowSamples, sampleRate);
 }
 
 function onRuntimePcmChunk(chunk) {
@@ -2370,26 +2448,12 @@ function onRuntimePcmChunk(chunk) {
   if (state.lastSpeechChunkAt && now - state.lastSpeechChunkAt > 650) {
     state.speakerChunks = [];
     state.speakerSampleCount = 0;
+    state.speakerQuickProbeCompleted = false;
   }
   state.lastSpeechChunkAt = now;
   state.speakerChunks.push(chunk);
   state.speakerSampleCount += chunk.length;
-
-  const sampleRate = state.audioContext?.sampleRate || SpeakerAudio.TARGET_SAMPLE_RATE;
-  const targetLength = Math.round(sampleRate * SPEAKER_WINDOW_SECONDS);
-  if (
-    state.speakerSampleCount < targetLength
-    || state.speakerVerificationPending
-    || now - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
-  ) return;
-
-  const allSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount);
-  const windowSamples = allSamples.slice(Math.max(0, allSamples.length - targetLength));
-  const overlapLength = Math.round(sampleRate * SPEAKER_OVERLAP_SECONDS);
-  const overlap = allSamples.slice(Math.max(0, allSamples.length - overlapLength));
-  state.speakerChunks = overlap.length ? [overlap] : [];
-  state.speakerSampleCount = overlap.length;
-  verifyOwnerVoice(windowSamples, sampleRate);
+  pumpSpeakerVerification(state.audioContext?.sampleRate || SpeakerAudio.TARGET_SAMPLE_RATE);
 }
 
 function beginDetectionWarmup() {
@@ -2528,6 +2592,7 @@ function pollMicrophone() {
   if (!state.silenceArmed) return;
   if (!state.silentSince) state.silentSince = Date.now();
   const silentForMs = Date.now() - state.silentSince;
+  setFloatingAnomalyDuration(silentForMs);
   const silentFor = Math.floor(silentForMs / 1000);
   if (!result.isSpeech) {
     setChip(UI.voiceState, `本人未出声 ${silentFor} 秒`, silentForMs >= violationLimitMs() ? 'alert' : '');

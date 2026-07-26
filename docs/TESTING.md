@@ -6,7 +6,7 @@
 - UI/CDP 测试必须使用隔离的数据目录和独立调试端口。
 - `speaker-ui-test.mjs` 与 `adversarial-ui-test.mjs` 会调用 `deleteSpeakerProfile()` 并退出被测应用，绝不能连接真实用户正在使用的安装版。
 - 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。这个旧数据根在产品改名为“凛冬督学局”后仍刻意保留，不能把路径中的旧名误判为待迁移项。
-- 1.13.0 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
+- 1.13.1 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
 
 ## Node 路径
 
@@ -46,6 +46,7 @@ cd D:\RedWatchRecite
 & $node scripts\speaker-audio-test.cjs
 & $node scripts\speaker-model-test.cjs
 & $node scripts\speaker-service-test.cjs
+& $node scripts\speaker-runtime-policy-test.cjs
 & $node scripts\window-mode-policy-test.cjs
 & $node scripts\floating-window-source-test.cjs
 & $node scripts\adversarial-user-simulation-test.cjs
@@ -62,7 +63,8 @@ cd D:\RedWatchRecite
 | `audio-event-model-smoke.cjs` | 纯 Node 加载实际 CED Mini；静音与合成键盘负样本；可选临时官方媒体和真实键盘混音正样本 |
 | `speaker-audio-test.cjs` | 重采样、24 秒、8 个 2.4 秒窗口、动态范围 |
 | `speaker-model-test.cjs` | 打印 3 个身份 fixture 的相似度矩阵；该脚本没有完整阈值断言 |
-| `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed |
+| `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed，以及实际 CAM++ 两秒本人/他人快速门槛 |
+| `speaker-runtime-policy-test.cjs` | 2 秒严格快速门槛、2.4 秒标准兜底、停声竞态、多模板最佳匹配，以及正式阈值不降低 |
 | `profile-crypto-test.cjs` | 当前 Windows 用户 DPAPI 的加密、非明文保存与跨独立子进程解密；不读写用户声纹档案 |
 | `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、224×170～320×225 尺寸钳制/持久化，以及偏好原子覆盖与损坏回退 |
 | `floating-window-source-test.cjs` | 同主窗口/Canvas、全区域拖动与按钮 no-drag、漂浮窗无音量/底噪控件、hover/focus 后台菜单、取消双击放大、黄色动画状态和提醒原状态返回的源码门禁 |
@@ -71,9 +73,9 @@ cd D:\RedWatchRecite
 
 `speaker-service-test.cjs` 只使用并清理 `work/speaker-service-test-data`。若修改该路径，必须重新确认不会指向用户数据。
 
-### 1.13.0 本轮验证边界
+### 1.13.1 本轮验证边界
 
-2026-07-22 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。修复后的 1.13.0 候选已在隔离目录完成后台构建、解包、核心源码哈希和禁止项核对；实际字节数与 SHA-256 见 `USER_GUIDE.md` 和 `RELEASE.md`。
+2026-07-26 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。1.13.1 候选已在隔离目录完成后台构建、解包、核心源码哈希和禁止项核对；实际字节数与 SHA-256 见 `USER_GUIDE.md` 和 `RELEASE.md`。
 
 “刁难用户”审查至少覆盖：
 
@@ -85,6 +87,8 @@ cd D:\RedWatchRecite
 - 用稳定风扇、正常朗读和“最初约 3 秒已经朗读”的污染序列验证固定 8 dB VAD：风扇不形成候选，朗读污染后噪声基线受保守上限保护，适应完成后的语音候选在 300 ms 内恢复。
 - 视频“播放—暂停不足 5 秒—继续”不重置；连续正常满 5 秒才清；键盘单独/风扇放行，语音、音乐和常见音效达到阈值。
 - 漂浮、隐藏和完整场景中触发提醒、休息、结束与异常时返回正确状态，不新增违规窗口。
+- 漂浮窗原生拖动不再拦截；缩放到任意合法尺寸后继续拖动仍保持宽高，状态与异常累计在悬停及所有模式下始终可见。
+- 多份声纹分别匹配；严格 2 秒快速门槛只接受高置信样本，未通过者保留 PCM 并回落 2.4 秒标准复核，停声后也会触发已满足长度的兜底。
 
 本轮只能用策略/源码后台测试覆盖可自动部分；真实指针、窗口观感、黑帧和按钮堆叠仍待独立 Windows 会话或虚拟机，不能声称已实测。
 
@@ -131,7 +135,7 @@ Remove-Item Env:BEISHU_AUDIO_EVENT_FIXTURES, Env:BEISHU_KEYBOARD_FIXTURES, Env:B
 
 ## 隔离启动开发版
 
-本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.13.0 明确跳过本节及后续全部 UI/CDP 脚本。
+本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.13.1 明确跳过本节及后续全部 UI/CDP 脚本。
 
 为每个 UI 测试创建新的数据目录和端口：
 
