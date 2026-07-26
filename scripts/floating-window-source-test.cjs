@@ -69,7 +69,7 @@ const floatingFunction = section(
 assert.match(floatingFunction, /mainWindowMode = 'floating'/);
 assert.match(floatingFunction, /setAlwaysOnTop\(true, 'floating'\)/);
 assert.match(floatingFunction, /setMainWindowSkipTaskbar\(true\)/);
-assert.match(floatingFunction, /setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)/);
+assert.match(floatingFunction, /applyFloatingSizeConstraints\(\)/);
 assert.match(floatingFunction, /setResizable\(true\)/);
 assert.doesNotMatch(floatingFunction, /new BrowserWindow/);
 const floatingTransition = floatingFunction.slice(floatingFunction.indexOf('mainWindow.hide()'));
@@ -106,6 +106,11 @@ assertOrdered(
 );
 assert.match(sceneTransition, /const rendered = await requestWindowModeRender\('scene'\)/);
 assert.match(sceneTransition, /if \(!rendered\) return failClosedWindowTransition\('scene'\)/);
+assert.ok(
+  sceneTransition.indexOf('applySceneSizeConstraints()') >= 0
+    && sceneTransition.indexOf('applySceneSizeConstraints()') < sceneTransition.indexOf('mainWindow.setBounds('),
+  'scene restore must remove the floating maximum before applying full-size bounds',
+);
 
 const alertFunction = section(
   mainSource,
@@ -124,6 +129,11 @@ assertOrdered(
 );
 assert.match(alertFunction, /if \(!rendered\)[\s\S]*failClosedWindowTransition\('alert'\)/);
 assert.match(alertFunction, /throw Object\.assign\(new Error/);
+assert.ok(
+  alertFunction.indexOf('applySceneSizeConstraints()') >= 0
+    && alertFunction.indexOf('applySceneSizeConstraints()') < alertFunction.indexOf('mainWindow.setBounds('),
+  'alert reveal must remove the floating maximum before applying full-size bounds',
+);
 
 assert.match(mainSource, /resolveAlertReturnMode/);
 assert.match(mainSource, /inlineAlertState = \{ alertId: \+\+inlineAlertSequence, returnMode \}/);
@@ -151,9 +161,18 @@ assert.match(mainSource, /mainWindow\.on\('will-move'/);
 assert.match(mainSource, /mainWindow\.on\('moved',[\s\S]*?floatingRestoreBounds = \{ \.\.\.mainWindow\.getBounds\(\) \}/);
 assert.match(mainSource, /mainWindow\.on\('will-move', \(\) => \{\s*if \(mainWindowMode === 'floating'\)/);
 assert.doesNotMatch(mainSource, /mainWindow\.on\('will-move', \(event/);
-assert.match(mainSource, /mainWindow\.on\('will-resize'/);
+assert.doesNotMatch(mainSource, /mainWindow\.on\('will-resize'/);
 assert.match(mainSource, /mainWindow\.on\('resize'/);
 assert.match(mainSource, /mainWindow\.on\('resized'/);
+const floatingResizeHandler = section(
+  mainSource,
+  "mainWindow.on('resize'",
+  "mainWindow.on('resized'",
+);
+assert.match(floatingResizeHandler, /mainWindow\.getBounds\(\)/);
+assert.doesNotMatch(floatingResizeHandler, /clampFloatingBounds|setBounds|setPosition|preventDefault/);
+assert.match(mainSource, /function applyFloatingSizeConstraints\(\)[\s\S]*?setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)[\s\S]*?setMaximumSize\(floatingWindowSize\.width, floatingWindowSize\.height\)/);
+assert.match(mainSource, /function applySceneSizeConstraints\(\)[\s\S]*?unrestrictedWindowMaximumSize[\s\S]*?setMaximumSize\(maximumWidth, maximumHeight\)/);
 assert.match(mainSource, /persistFloatingWindowSize/);
 assert.match(mainSource, /readFloatingWindowSize/);
 assert.match(mainSource, /writeFloatingWindowSize/);
@@ -169,10 +188,10 @@ assert.doesNotMatch(preloadSource, /ipcRenderer\.send\([^)]*floating/);
 
 const floatingMarkup = htmlSource.match(/<section id="floating-statusbar"[\s\S]*?<\/section>/)?.[0] || '';
 assert.match(floatingMarkup, /id="floating-voice-state"/);
-assert.match(floatingMarkup, /id="floating-anomaly-time"[^>]*>未确认本人 0 秒</);
+assert.doesNotMatch(floatingMarkup, /id="floating-anomaly-time"/);
 assert.match(floatingMarkup, /id="floating-timer"/);
-assert.match(floatingMarkup, /id="floating-hide-button"/);
-assert.match(floatingMarkup, /id="floating-expand-button"/);
+assert.match(floatingMarkup, /id="floating-hide-button"[^>]*>隐藏<\/button>/);
+assert.match(floatingMarkup, /id="floating-expand-button"[^>]*>放大<\/button>/);
 assert.doesNotMatch(floatingMarkup, /meter|volume|threshold/i);
 assert.doesNotMatch(htmlSource, /floating-threshold|voice-threshold|volume-threshold/);
 assert.doesNotMatch(appSource, /floatingVoiceThreshold|voiceThreshold|thresholdMarker/);
@@ -189,7 +208,13 @@ assert.match(cssSource, /body\[data-window-mode="floating"\]:hover \.floating-ho
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas/);
 assert.match(cssSource, /aspect-ratio: 16 \/ 9/);
 assert.match(cssSource, /\.floating-timer[^}]*white-space: nowrap/);
-assert.match(cssSource, /\.floating-timer[^}]*min-width: 0[^}]*text-overflow: ellipsis/);
+assert.match(cssSource, /\.floating-timer[^}]*min-width: 96px[^}]*text-overflow: ellipsis/);
+assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*gap: 4px[^}]*padding: 0 6px/);
+assert.match(cssSource, /\.floating-action\s*\{[^}]*min-width: 40px/);
+assert.ok(
+  96 + (40 * 2) + (4 * 2) + (6 * 2) <= 224,
+  'the hover timer and both actions must fit the minimum floating width',
+);
 assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*-webkit-app-region: drag/);
 assert.match(cssSource, /\.floating-action\s*\{[^}]*-webkit-app-region: no-drag/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene\s*\{[^}]*-webkit-app-region: drag/);
@@ -204,12 +229,15 @@ assert.match(cssSource, /\.background-action\.menu-open \.background-action-menu
 assert.match(cssSource, /#background-button:disabled \+ \.background-action-menu\s*\{ display: none; \}/);
 
 assert.match(appSource, /UI\.floatingVoiceState\.textContent = text/);
-assert.match(appSource, /function renderFloatingAnomaly\(\)[\s\S]*?异常声音 \$\{seconds\} 秒[\s\S]*?未确认本人 \$\{seconds\} 秒/);
-assert.match(appSource, /quietResult\.violated \? quietResult\.violationThresholdMs : quietResult\.suspectedSpeechMs/);
-assert.match(appSource, /const silentForMs = Date\.now\(\) - state\.silentSince;\s*setFloatingAnomalyDuration\(silentForMs\)/);
-assert.match(appSource, /if \(confirmed\) \{[\s\S]*?setFloatingAnomalyDuration\(0\)/);
-assert.match(cssSource, /\.floating-anomaly-time\s*\{/);
-assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-(?:voice-state|anomaly-time)[^{]*\{[^}]*opacity:\s*0/);
+assert.match(appSource, /function rejectedSpeakerStatus\(now = Date\.now\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
+assert.match(appSource, /state\.lastSpeakerRejected \? rejectedSpeakerStatus\(now\) : '正在复核本人声音'/);
+assert.match(
+  appSource,
+  /const silenceViolated = silentForMs >= violationLimitMs\(\);[\s\S]*?const message = silenceViolated\s*\? `本人未出声 \$\{silentFor\} 秒`\s*: '暂未检测到本人声音';[\s\S]*?setChip\(UI\.voiceState, message, silenceViolated \? 'alert' : ''\)/,
+);
+assert.doesNotMatch(appSource, /floatingAnomaly|renderFloatingAnomaly|setFloatingAnomalyDuration/);
+assert.doesNotMatch(cssSource, /\.floating-anomaly-time\s*\{/);
+assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-voice-state[^{]*\{[^}]*opacity:\s*0/);
 assert.match(appSource, /UI\.floatingTimer\.textContent = `已学习 \$\{elapsed\}`/);
 assert.match(appSource, /hideWindowFromChrome\('hidden'\)/);
 assert.match(appSource, /restoreSceneMode\(\)/);

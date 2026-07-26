@@ -196,6 +196,23 @@ function clearProfile() {
   return { cleared: true };
 }
 
+function scoreEnrolledProfiles(embedding, profiles, threshold, strongThreshold) {
+  const scoredProfiles = profiles.map((profile) => ({
+    id: profile.id,
+    score: cosineSimilarity(embedding, profile.centroid),
+  })).sort((left, right) => right.score - left.score);
+  const bestProfile = scoredProfiles[0];
+  if (!bestProfile) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
+  const score = bestProfile.score;
+  const matched = score >= threshold;
+  return {
+    matched,
+    score,
+    profileId: bestProfile.id,
+    strongMatch: Boolean(matched && score >= strongThreshold),
+  };
+}
+
 function verify(payload) {
   ensureInitialized();
   if (!enrolledProfiles.length) throw serviceError('PROFILE_MISSING', '尚未录入本人声音。');
@@ -207,22 +224,18 @@ function verify(payload) {
   }
 
   const { embedding, quality } = extractEmbedding(payload);
-  const scoredProfiles = enrolledProfiles.map((profile) => ({
-    id: profile.id,
-    score: cosineSimilarity(embedding, profile.centroid),
-  })).sort((left, right) => right.score - left.score);
-  const bestProfile = scoredProfiles[0];
-  const score = bestProfile.score;
   // Each saved profile represents the same user in a particular microphone or
   // environment. Averaging every profile into one global vector can dilute a
   // valid best-profile match, so use the best quality-checked profile without
   // lowering either identity threshold.
-  const matched = score >= threshold;
+  const decision = scoreEnrolledProfiles(
+    embedding,
+    enrolledProfiles,
+    threshold,
+    strongThreshold,
+  );
   return {
-    matched,
-    score,
-    profileId: bestProfile.id,
-    strongMatch: Boolean(matched && score >= strongThreshold),
+    ...decision,
     quality,
   };
 }
@@ -259,22 +272,28 @@ const handlers = {
   verify,
 };
 
-parentPort.on('message', (message) => {
-  const id = Number(message?.id);
-  const method = String(message?.method || '');
-  try {
-    const handler = handlers[method];
-    if (!handler) throw serviceError('UNKNOWN_METHOD', '未知的声纹服务操作。');
-    const result = handler(message.payload || {});
-    parentPort.postMessage({ id, ok: true, result });
-  } catch (error) {
-    parentPort.postMessage({
-      id,
-      ok: false,
-      error: {
-        code: error.code || 'SPEAKER_WORKER_ERROR',
-        message: error.message || '声纹处理失败。',
-      },
-    });
-  }
-});
+if (parentPort) {
+  parentPort.on('message', (message) => {
+    const id = Number(message?.id);
+    const method = String(message?.method || '');
+    try {
+      const handler = handlers[method];
+      if (!handler) throw serviceError('UNKNOWN_METHOD', '未知的声纹服务操作。');
+      const result = handler(message.payload || {});
+      parentPort.postMessage({ id, ok: true, result });
+    } catch (error) {
+      parentPort.postMessage({
+        id,
+        ok: false,
+        error: {
+          code: error.code || 'SPEAKER_WORKER_ERROR',
+          message: error.message || '声纹处理失败。',
+        },
+      });
+    }
+  });
+}
+
+module.exports = {
+  scoreEnrolledProfiles,
+};

@@ -395,9 +395,7 @@ body[data-window-mode="floating"] .floating-statusbar {
   min-width: 0;
   overflow: hidden;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 1px;
+  align-items: center;
 }
 .floating-voice-state {
   max-width: 100%;
@@ -411,25 +409,18 @@ body[data-window-mode="floating"] .floating-statusbar {
 .floating-voice-state.good { color: var(--good); }
 .floating-voice-state.watch { color: #f0bd5d; }
 .floating-voice-state.alert { color: #ffb2a8; }
-.floating-anomaly-time {
-  overflow: hidden;
-  color: #ead5b4;
-  font: 700 .64rem/1.1 ui-monospace, Consolas, monospace;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .floating-hover-tools {
   position: absolute;
   top: 44px;
   right: 0;
   bottom: auto;
   left: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(96px, 1fr) auto auto;
   height: 34px;
   align-items: center;
-  justify-content: flex-end;
-  gap: 5px;
-  padding: 0 7px 0 22px;
+  gap: 4px;
+  padding: 0 6px;
   opacity: 0;
   pointer-events: none;
   background: linear-gradient(90deg, transparent, rgba(22, 12, 11, .98) 18%);
@@ -438,11 +429,11 @@ body[data-window-mode="floating"] .floating-statusbar {
 }
 body[data-window-mode="floating"]:hover .floating-hover-tools,
 body[data-window-mode="floating"]:focus-within .floating-hover-tools { opacity: 1; pointer-events: auto; }
-.floating-timer { flex: 1 1 auto; min-width: 0; overflow: hidden; color: #ead5b4; cursor: move; font: 700 .72rem ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; -webkit-app-region: drag; }
+.floating-timer { min-width: 96px; overflow: hidden; color: #ead5b4; cursor: move; font: 700 .72rem ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; -webkit-app-region: drag; }
 .floating-action {
-  min-width: 42px;
+  min-width: 40px;
   height: 27px;
-  padding: 0 7px;
+  padding: 0 6px;
   border: 1px solid rgba(244, 233, 206, .2);
   color: var(--ink);
   background: rgba(48, 30, 25, .88);

@@ -16,7 +16,6 @@ const UI = {
   windowMaximizeButton: document.querySelector('#window-maximize-button'),
   windowCloseButton: document.querySelector('#window-close-button'),
   floatingVoiceState: document.querySelector('#floating-voice-state'),
-  floatingAnomalyTime: document.querySelector('#floating-anomaly-time'),
   floatingTimer: document.querySelector('#floating-timer'),
   floatingHideButton: document.querySelector('#floating-hide-button'),
   floatingExpandButton: document.querySelector('#floating-expand-button'),
@@ -121,7 +120,6 @@ const state = {
   breakPromptPending: false,
   quietDetector: null,
   latestQuietResult: null,
-  floatingAnomalyMs: 0,
   elapsedTimer: null,
   audioTimer: null,
   patrolTimer: null,
@@ -374,17 +372,11 @@ function violationLimitMs() {
   return violationLimitSeconds() * 1_000;
 }
 
-function renderFloatingAnomaly() {
-  const durationMs = Math.max(0, Number(state.floatingAnomalyMs) || 0);
-  const seconds = Math.floor(durationMs / 1_000);
-  UI.floatingAnomalyTime.textContent = state.mode === 'study'
-    ? `异常声音 ${seconds} 秒`
-    : `未确认本人 ${seconds} 秒`;
-}
-
-function setFloatingAnomalyDuration(durationMs = 0) {
-  state.floatingAnomalyMs = Math.max(0, Number(durationMs) || 0);
-  renderFloatingAnomaly();
+function rejectedSpeakerStatus(now = Date.now()) {
+  const seconds = state.silentSince
+    ? Math.max(0, Math.floor((now - state.silentSince) / 1_000))
+    : 0;
+  return `暂未确认本人声音 ${seconds} 秒`;
 }
 
 function resetDetectionAfterSettingChange() {
@@ -401,7 +393,6 @@ function resetDetectionAfterSettingChange() {
     state.silentSince = state.calibrating ? 0 : Date.now();
     state.silenceArmed = !state.calibrating;
   }
-  setFloatingAnomalyDuration(0);
   if (state.calibrating) {
     updatePreflightUi('设置已更新，校准完成后继续测试。');
     return;
@@ -676,7 +667,6 @@ function setMode(mode) {
     stopPreflightTest({ status: '模式已切换，可按新设置重新测试。' }).catch(handleAuxiliaryUiError);
   }
   state.mode = mode;
-  setFloatingAnomalyDuration(0);
   state.milestoneLedger = new POLICY.MilestoneLedger(mode);
   saveSettings();
   updateModeUi();
@@ -1227,7 +1217,6 @@ function armSilenceClock() {
   state.silenceArmed = true;
   state.silentSince = state.mode === 'recite' ? Date.now() : 0;
   state.silencePausedAt = 0;
-  setFloatingAnomalyDuration(0);
   state.quietDetector?.reset();
   if (state.mode === 'study') resetStudyAudioRuntime();
 }
@@ -1511,14 +1500,12 @@ async function releaseMicrophone() {
   state.silenceArmed = false;
   state.silentSince = 0;
   state.silencePausedAt = 0;
-  setFloatingAnomalyDuration(0);
   resetSpeakerRuntime();
   resetStudyAudioRuntime();
   state.microphoneProcessingWarning = '';
 }
 
 function resetIdleDetectionUi() {
-  setFloatingAnomalyDuration(0);
   if (!state.active && !state.startPending && !state.enrollmentOpen && !state.enrollmentPending) {
     setChip(UI.voiceState, state.mode === 'study' ? '等待安静自习' : '未开启');
     UI.voiceStatus.textContent = '未在检测声音';
@@ -2051,13 +2038,11 @@ async function finishPreview() {
 function startElapsedTimer() {
   UI.timer.textContent = '00:00';
   UI.floatingTimer.textContent = '已学习 00:00';
-  setFloatingAnomalyDuration(0);
   stopElapsedTimer();
   state.elapsedTimer = window.setInterval(() => {
     const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
     UI.timer.textContent = elapsed;
     UI.floatingTimer.textContent = `已学习 ${elapsed}`;
-    renderFloatingAnomaly();
     settleStudyMilestones();
   }, 1000);
 }
@@ -2156,9 +2141,6 @@ function renderStudyAudioDecision(quietResult, decision) {
   const candidateActive = quietResult.rawEvidenceMs > 0;
   state.latestQuietResult = quietResult;
   state.latestStudyAudioDecision = decision;
-  setFloatingAnomalyDuration(
-    quietResult.violated ? quietResult.violationThresholdMs : quietResult.suspectedSpeechMs,
-  );
   document.body.dataset.voiceDetected = String(
     decision.mediaEvidence || candidateActive,
   );
@@ -2351,7 +2333,6 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
       state.lastSpeakerRejected = false;
       state.ownerConfirmedUntil = now + SPEAKER_CONFIRM_HOLD_MS;
       state.silentSince = 0;
-      setFloatingAnomalyDuration(0);
       if (quickProbe) {
         state.speakerChunks = [];
         state.speakerSampleCount = 0;
@@ -2369,7 +2350,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
     } else {
       if (state.ownerCandidateAt && now - state.ownerCandidateAt > 6_000) state.ownerCandidateAt = 0;
       document.body.dataset.voiceDetected = 'false';
-      const message = state.lastSpeakerRejected ? '暂未确认本人声音' : '正在复核本人声音';
+      const message = state.lastSpeakerRejected ? rejectedSpeakerStatus(now) : '正在复核本人声音';
       setChip(UI.voiceState, message, state.lastSpeakerRejected ? 'alert' : '');
       UI.voiceStatus.textContent = message;
     }
@@ -2580,7 +2561,7 @@ function pollMicrophone() {
       setChip(UI.voiceState, '正在复核本人声音');
       UI.voiceStatus.textContent = '正在复核本人声音';
     } else if (state.lastSpeakerDecisionAt && now - state.lastSpeakerDecisionAt < 1_800 && !state.lastSpeakerMatched) {
-      const message = state.lastSpeakerRejected ? '暂未确认本人声音' : '正在复核本人声音';
+      const message = state.lastSpeakerRejected ? rejectedSpeakerStatus(now) : '正在复核本人声音';
       setChip(UI.voiceState, message, state.lastSpeakerRejected ? 'alert' : '');
       UI.voiceStatus.textContent = message;
     } else {
@@ -2592,13 +2573,16 @@ function pollMicrophone() {
   if (!state.silenceArmed) return;
   if (!state.silentSince) state.silentSince = Date.now();
   const silentForMs = Date.now() - state.silentSince;
-  setFloatingAnomalyDuration(silentForMs);
   const silentFor = Math.floor(silentForMs / 1000);
+  const silenceViolated = silentForMs >= violationLimitMs();
   if (!result.isSpeech) {
-    setChip(UI.voiceState, `本人未出声 ${silentFor} 秒`, silentForMs >= violationLimitMs() ? 'alert' : '');
-    UI.voiceStatus.textContent = `本人未出声 ${silentFor} 秒`;
+    const message = silenceViolated
+      ? `本人未出声 ${silentFor} 秒`
+      : '暂未检测到本人声音';
+    setChip(UI.voiceState, message, silenceViolated ? 'alert' : '');
+    UI.voiceStatus.textContent = message;
   }
-  if (silentForMs >= violationLimitMs()) {
+  if (silenceViolated) {
     if (state.speakerVerificationPending) {
       if (preflight) {
         state.preflightThresholdReached = false;

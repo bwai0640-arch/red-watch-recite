@@ -433,14 +433,22 @@ function runStaticAdversary() {
 
   assert.match(mainSource, /floatingWindowMinimumSize\s*=\s*Object\.freeze\(\{ width: 224, height: 170 \}\)/);
   assert.match(mainSource, /setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)/);
+  assert.match(mainSource, /setMaximumSize\(floatingWindowSize\.width, floatingWindowSize\.height\)/);
   assert.match(mainSource, /function showFloatingWindowNow\([\s\S]*?setResizable\(true\)/);
   assert.match(mainSource, /mainWindow\.on\('resized',[\s\S]*?persistFloatingWindowSize\(\)/);
   assert.match(mainSource, /mainWindow\.on\('moved',[\s\S]*?floatingRestoreBounds = \{ \.\.\.mainWindow\.getBounds\(\) \}/);
   assert.match(mainSource, /mainWindow\.on\('will-move', \(\) => \{\s*if \(mainWindowMode === 'floating'\)/);
   assert.doesNotMatch(mainSource, /mainWindow\.on\('will-move', \(event/);
-  assert.match(htmlSource, /id="floating-anomaly-time"[^>]*>未确认本人 0 秒</);
-  assert.match(appSource, /function renderFloatingAnomaly\(\)[\s\S]*?异常声音 \$\{seconds\} 秒[\s\S]*?未确认本人 \$\{seconds\} 秒/);
-  assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-(?:voice-state|anomaly-time)[^{]*\{[^}]*opacity:\s*0/);
+  assert.doesNotMatch(mainSource, /mainWindow\.on\('will-resize'/);
+  assert.doesNotMatch(htmlSource, /id="floating-anomaly-time"/);
+  assert.match(htmlSource, /id="floating-hide-button"[^>]*>隐藏<\/button>/);
+  assert.match(htmlSource, /id="floating-expand-button"[^>]*>放大<\/button>/);
+  assert.match(appSource, /function rejectedSpeakerStatus\(now = Date\.now\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
+  assert.match(appSource, /const message = silenceViolated\s*\? `本人未出声 \$\{silentFor\} 秒`\s*: '暂未检测到本人声音'/);
+  assert.doesNotMatch(appSource, /floatingAnomaly|renderFloatingAnomaly|setFloatingAnomalyDuration/);
+  assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-voice-state[^{]*\{[^}]*opacity:\s*0/);
+  assert.match(appSource, /UI\.floatingTimer\.textContent = `已学习 \$\{elapsed\}`/);
+  assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*grid-template-columns:\s*minmax\(96px, 1fr\) auto auto/);
   assert.match(mainSource, /let backgroundPreferenceWriteChain = Promise\.resolve\(\)/);
   assert.match(mainSource, /function persistFloatingWindowSize\(\)[\s\S]*?backgroundPreferenceWriteChain[\s\S]*?writeFloatingWindowSize/);
   assert.doesNotMatch(appSource, /floatingVoiceState\.addEventListener\('dblclick'/);
@@ -474,7 +482,7 @@ function runStaticAdversary() {
   assert.match(appSource, /Promise\.race\(\[[\s\S]*?verifySpeaker\([\s\S]*?声纹处理超时/);
   assert.match(
     appSource,
-    /if \(silentForMs >= violationLimitMs\(\)\) \{\s*if \(state\.speakerVerificationPending\) \{[\s\S]*?return;[\s\S]*?const graceDeadline/,
+    /if \(silenceViolated\) \{\s*if \(state\.speakerVerificationPending\) \{[\s\S]*?return;[\s\S]*?const graceDeadline/,
   );
 
   // The alert overlay is ready before the full-size native window appears and

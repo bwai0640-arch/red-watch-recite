@@ -67,6 +67,7 @@ async function enrollOwner(service) {
 
 async function run() {
   await fsp.rm(dataRoot, { recursive: true, force: true });
+  await fsp.mkdir(dataRoot, { recursive: true });
   const service = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
   let state = await service.initialize();
   assert.equal(state.ready, true);

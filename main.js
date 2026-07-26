@@ -103,6 +103,7 @@ let inlineAlertState = null;
 let floatingRestoreBounds = null;
 let floatingManualMovePending = false;
 let floatingPreferredSize = null;
+let unrestrictedWindowMaximumSize = null;
 let mainWindowSkipsTaskbar = false;
 let windowModeTransitionSequence = 0;
 let windowTransitionChain = Promise.resolve();
@@ -208,6 +209,19 @@ function breakPromptBounds() {
 function setFloatingBounds(bounds) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setBounds(bounds, false);
+}
+
+function applySceneSizeConstraints() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const [maximumWidth, maximumHeight] = unrestrictedWindowMaximumSize || mainWindow.getMaximumSize();
+  mainWindow.setMaximumSize(maximumWidth, maximumHeight);
+  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
+}
+
+function applyFloatingSizeConstraints() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setMinimumSize(floatingWindowMinimumSize.width, floatingWindowMinimumSize.height);
+  mainWindow.setMaximumSize(floatingWindowSize.width, floatingWindowSize.height);
 }
 
 function persistFloatingWindowSize() {
@@ -486,6 +500,7 @@ function createMainWindow() {
       v8CacheOptions: 'none',
     },
   });
+  unrestrictedWindowMaximumSize = mainWindow.getMaximumSize();
 
   lockWebContentsNavigation(mainWindow.webContents, mainRendererUrl);
   mainWindow.loadURL(mainRendererUrl);
@@ -521,32 +536,17 @@ function createMainWindow() {
     // pre-resize width/height. Recording only never changes the user's size.
     floatingRestoreBounds = { ...mainWindow.getBounds() };
   });
-  mainWindow.on('will-resize', (event, nextBounds) => {
-    if (mainWindowMode !== 'floating') return;
-    const display = screen.getDisplayMatching(nextBounds);
-    const clamped = clampFloatingBounds(
-      nextBounds,
-      display.workArea,
-      floatingWindowSize,
-      floatingWindowMinimumSize,
-    );
-    if (clamped.width === nextBounds.width && clamped.height === nextBounds.height) return;
-    event.preventDefault();
-    mainWindow.setBounds(clamped, false);
-  });
   mainWindow.on('resize', () => {
     if (mainWindowMode !== 'floating') return;
     const bounds = mainWindow.getBounds();
-    const display = screen.getDisplayMatching(bounds);
-    floatingRestoreBounds = clampFloatingBounds(
-      bounds,
-      display.workArea,
-      floatingWindowSize,
-      floatingWindowMinimumSize,
-    );
+    // Native minimum/maximum constraints own the live resize gesture. Recording
+    // the resulting bounds here avoids changing x/y under the pointer, which
+    // previously made left/top-edge resizing feel as if the window stuck to
+    // the screen edge.
+    floatingRestoreBounds = { ...bounds };
     floatingPreferredSize = {
-      width: floatingRestoreBounds.width,
-      height: floatingRestoreBounds.height,
+      width: bounds.width,
+      height: bounds.height,
     };
   });
   mainWindow.on('resized', () => {
@@ -555,6 +555,7 @@ function createMainWindow() {
   mainWindow.on('closed', () => {
     clearPendingWindowModeTransitions();
     mainWindow = null;
+    unrestrictedWindowMaximumSize = null;
     mainWindowSkipsTaskbar = false;
     destroyBreakPromptWindow();
   });
@@ -578,7 +579,7 @@ async function showSceneWindowNow({ force = false } = {}) {
   mainWindow.hide();
   inlineAlertState = null;
   mainWindowMode = 'scene';
-  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
+  applySceneSizeConstraints();
   mainWindow.setAlwaysOnTop(false);
   setMainWindowSkipTaskbar(false);
   mainWindow.setResizable(true);
@@ -606,6 +607,7 @@ async function showFloatingWindowNow() {
     return { blockedByAlert: true, ...runtimeWindowState() };
   }
   if (mainWindowMode === 'floating') {
+    applyFloatingSizeConstraints();
     mainWindow.setAlwaysOnTop(true, 'floating');
     setMainWindowSkipTaskbar(true);
     positionFloatingWindow({
@@ -619,10 +621,12 @@ async function showFloatingWindowNow() {
   }
   inlineAlertState = null;
   mainWindow.hide();
-  mainWindowMode = 'floating';
   mainWindow.setFullScreen(false);
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setMinimumSize(floatingWindowMinimumSize.width, floatingWindowMinimumSize.height);
+  // Apply native constraints before switching the bookkeeping mode so any
+  // automatic shrink does not overwrite the user's saved floating position.
+  applyFloatingSizeConstraints();
+  mainWindowMode = 'floating';
   mainWindow.setResizable(true);
   mainWindow.setMinimizable(false);
   mainWindow.setMaximizable(false);
@@ -679,7 +683,7 @@ async function revealForInlineAlertNow() {
   mainWindow.hide();
   mainWindowMode = 'alert';
   mainWindow.setFullScreen(false);
-  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
+  applySceneSizeConstraints();
   mainWindow.setResizable(true);
   mainWindow.setMinimizable(false);
   mainWindow.setMaximizable(false);

@@ -23,7 +23,7 @@
 ```powershell
 $node = '<工作区依赖定位结果中的 Node.js executable>'
 cd D:\RedWatchRecite
-$candidate = 'work\release-candidate-1.13.1'
+$candidate = 'work\release-candidate-1.13.2'
 if (Test-Path -LiteralPath $candidate) { throw "候选目录已存在，请换一个全新目录：$candidate" }
 & $node '.\node_modules\electron-builder\cli.js' --win nsis --config.directories.output=$candidate
 & $node '.\node_modules\electron-builder\cli.js' --win portable --config.directories.output=$candidate --config.win.artifactName='凛冬督学局-便携版-${version}.${ext}'
@@ -55,7 +55,7 @@ electron-builder 还会在隔离候选目录生成 `win-unpacked\凛冬督学局
 - 验证休息后的有声开场结束时，背书重新自动适应环境约 3 秒，自习直接恢复分类并重新形成约 2 秒首窗。
 - 验证两个窗口都使用禁用缓存的内存会话；正常退出后隔离数据根中不得残留 `TransientElectronData`、`SessionData`、`Code Cache`、`GPUCache`。
 - 验证安装版的名称、窗口标题、托盘名称、桌面和开始菜单快捷方式都是“凛冬督学局”。
-- 验证完整场景切到漂浮窗时仍是同一 `webContents` 与 Canvas、窗口总数不增加；漂浮窗在 224×170～320×225 间缩放并保存尺寸，除操作按钮外全区域可拖，置顶/跳过任务栏；悬停显示计时、隐藏和放大，取消双击放大。
+- 验证完整场景切到漂浮窗时仍是同一 `webContents` 与 Canvas、窗口总数不增加；漂浮窗用 Windows 原生约束在 224×170～320×225 间缩放并保存尺寸，实时缩放不得用 `will-resize` 强改位置，除操作按钮外全区域可拖，置顶/跳过任务栏；常态和未达阈值时只有判断与动画，只有红色异常文案才带秒数；悬停显示“已学习”、隐藏和放大，“隐藏”进入完全后台，取消双击放大。
 - 验证“隐藏到后台”按钮的 hover/focus 菜单不会与其他按钮堆叠，Escape 能关闭；两种选择立即生效且旧异步选择不能覆盖新选择。
 - 验证动画期间所有可见状态副本统一显示黄色“好好学！盯着你呢！”，不出现“检测暂停”或违规红色。
 - 验证 `window-preferences.json` 只含 `backgroundMode` 与 `floatingWindowSize`，不保存位置、检测结果、学习时长、音频、声纹或个人信息。
@@ -75,6 +75,13 @@ Copy-Item -LiteralPath 'D:\RedWatchRecite\docs\USER_GUIDE.md' -Destination 'D:\R
 ```
 
 将实际字节数和 SHA-256 写入 `docs/USER_GUIDE.md`，随后再次复制说明到 `release-staging\使用说明.md`，并确认两份文件哈希一致。
+
+1.13.2 隔离候选已于 2026-07-26 完成后台静态核对，未启动任何 EXE：
+
+- 安装版：286,475,560 字节；SHA-256 `759DBE6F470A51888CD923DDA30823C7E9B4355652323988C3A08B31D8CED72C`；FileVersion/ProductVersion `1.13.2`；Authenticode `NotSigned`。
+- 便携版：275,806,123 字节；SHA-256 `74148C63DC3716EBF30845775B1B3FF5440DCFDCCA28C804BD52C32DE78D73EF`；FileVersion/ProductVersion `1.13.2`；Authenticode `NotSigned`。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当前工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
+- `USER_GUIDE.md` 与 `release-staging/使用说明.md` 内容一致，SHA-256 均为 `ED050E8AE1A55FADCF65716DCA94AC3C1DE33FC0DF1353DF034A4A83E2A57579`；交付目录最终仅含两份 1.13.2 EXE 和该说明书。
 
 1.13.1 隔离候选已于 2026-07-26 完成后台静态核对，未启动任何 EXE：
 
