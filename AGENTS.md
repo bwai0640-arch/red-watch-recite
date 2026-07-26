@@ -19,7 +19,7 @@
 - 当前可见产品名固定为“凛冬督学局”；当前源码版本为 `1.13.2`。1.13.2 候选交付物、大小与 SHA-256 必须来自本版隔离构建，不得沿用旧版数值。
 - 应用标题下固定显示“原作：叛逆蓝牙 · 二创：眼泪斷了线”；README 开头必须先显示同一署名。署名不等于素材授权，不得据此跳过资产权利核验。
 - GitHub 发布目标为 `bwai0640-arch/red-watch-recite`。提交者使用该账号对应的 GitHub `noreply` 邮箱；任何 push 或 Release 上传前都必须复查实际提交历史、个人信息、密钥与发布附件。
-- `docs/USER_GUIDE.md` 是用户说明的源码侧权威副本；本地安装包交付时必须复制为 `release-staging/使用说明.md` 并保持完全一致。
+- `docs/USER_GUIDE.md` 是面向普通用户的使用说明权威副本；内容应以产品介绍、完整上手流程和实际操作为主，构建哈希、内部算法阈值、源码代号与测试边界归入发布/测试/架构文档。本地交付时必须复制为 `release-staging/使用说明.md` 并保持完全一致。
 - `renderer/scene-rules.js` 是自动动画顺序与随机池的唯一事实源，禁止在其他文件复制第二套业务规则。
 
 ## 不可破坏的产品规则
@@ -99,7 +99,7 @@
 - UI/CDP 测试必须使用独立端口、隔离数据目录和全新实例。完整命令见 `docs/TESTING.md`。
 - 正式构建必须先输出到全新的 `work/release-candidate-<version>` 隔离目录；候选验证通过后，只把安装版、便携版和同步说明复制到 `release-staging`。不得让 electron-builder 直接清理 `release-staging`、含真实用户数据的 `dist` 或已安装目录。
 - 发布前要求用户退出凛冬督学局；不得覆盖旧 `dist` 或已安装应用。
-- 重新打包后必须重新计算安装版和便携版的大小与 SHA-256，并同步到 `docs/USER_GUIDE.md` 和 `release-staging/使用说明.md`。
+- 重新打包后必须重新计算安装版和便携版的大小与 SHA-256，并同步到 `docs/RELEASE.md`；用户说明与 `release-staging/使用说明.md` 仍须保持完全一致。
 - 本地交付目录仅保留安装版、便携版和同步后的说明书；不得交付 `win-unpacked`、`builder-debug.yml`、旧版 EXE 或测试目录。
 
 ## 深入文档

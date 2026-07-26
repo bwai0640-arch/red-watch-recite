@@ -1,4 +1,4 @@
-# 凛冬督学局本地安装版发布清单
+# 凛冬督学局本地发布清单
 
 ## 红线
 
@@ -74,27 +74,27 @@ $artifacts | Get-FileHash -Algorithm SHA256
 Copy-Item -LiteralPath 'D:\RedWatchRecite\docs\USER_GUIDE.md' -Destination 'D:\RedWatchRecite\release-staging\使用说明.md' -Force
 ```
 
-将实际字节数和 SHA-256 写入 `docs/USER_GUIDE.md`，随后再次复制说明到 `release-staging\使用说明.md`，并确认两份文件哈希一致。
+将实际字节数和 SHA-256 写入本文件，随后复制面向用户的说明到 `release-staging\使用说明.md`，并确认它与 `docs/USER_GUIDE.md` 完全一致。用户说明不承载构建哈希、内部算法阈值或测试日志。
 
 1.13.2 隔离候选已于 2026-07-26 完成后台静态核对，未启动任何 EXE：
 
 - 安装版：286,475,560 字节；SHA-256 `759DBE6F470A51888CD923DDA30823C7E9B4355652323988C3A08B31D8CED72C`；FileVersion/ProductVersion `1.13.2`；Authenticode `NotSigned`。
 - 便携版：275,806,123 字节；SHA-256 `74148C63DC3716EBF30845775B1B3FF5440DCFDCCA28C804BD52C32DE78D73EF`；FileVersion/ProductVersion `1.13.2`；Authenticode `NotSigned`。
 - `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当前工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
-- `USER_GUIDE.md` 与 `release-staging/使用说明.md` 内容一致，SHA-256 均为 `ED050E8AE1A55FADCF65716DCA94AC3C1DE33FC0DF1353DF034A4A83E2A57579`；交付目录最终仅含两份 1.13.2 EXE 和该说明书。
+- `USER_GUIDE.md` 与 `release-staging/使用说明.md` 内容一致，SHA-256 均为 `1039D545C1725CF95BB3359A2EAF3FC72E005A45BF56F7ACD1CFC01025A0F3CB`；交付目录最终仅含两份 1.13.2 EXE 和该说明书。
 
 1.13.1 隔离候选已于 2026-07-26 完成后台静态核对，未启动任何 EXE：
 
 - 安装版：286,475,279 字节；SHA-256 `7E59AFFD7E34BC033102E2F80C109639A818BD3C1B76EA3ECCB9CC035A7F2D9D`；FileVersion/ProductVersion `1.13.1`；Authenticode `NotSigned`。
 - 便携版：275,802,516 字节；SHA-256 `0ED9D48814F6335F175F1FADF98082C672FE9EE2F21242BE64602CA4C11BE34D`；FileVersion/ProductVersion `1.13.1`；Authenticode `NotSigned`。
-- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当前工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当时工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
 - `USER_GUIDE.md` 与 `release-staging/使用说明.md` 内容一致，SHA-256 均为 `4048470A621BCB7579ED67A7F9C57B741680083778D7091A873BC98A95F8D915`；交付目录最终仅含两份 1.13.1 EXE 和该说明书。
 
 1.13.0 隔离候选已于 2026-07-22 完成后台静态核对，未启动任何 EXE：
 
 - 安装版：286,476,167 字节；SHA-256 `2528DAE227FA9B192A8FC4E93F2E15720AC90BAD0A01CC88D0DE79D6EAA56069`；FileVersion/ProductVersion `1.13.0`；Authenticode `NotSigned`。
 - 便携版：275,808,923 字节；SHA-256 `0F563B123B2953D88CB99B92A34DA760D141F11F5A3B3FE3D29CB590F571FC2D`；FileVersion/ProductVersion `1.13.0`；Authenticode `NotSigned`。
-- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当前工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当时工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
 - `USER_GUIDE.md` 与 `release-staging/使用说明.md` 内容一致，SHA-256 均为 `145744264C3D629E8B7D5B5E7E42A1295390722C7E042C3DDA23F51C6F122D47`；交付目录最终仅含两份 1.13.0 EXE 和该说明书。
 
 ## 5. 交付与卸载

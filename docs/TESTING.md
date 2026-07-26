@@ -75,7 +75,7 @@ cd D:\RedWatchRecite
 
 ### 1.13.2 本轮验证边界
 
-2026-07-26 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。1.13.2 候选的构建、解包、核心源码哈希和禁止项核对结果见 `USER_GUIDE.md` 和 `RELEASE.md`。
+2026-07-26 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。1.13.2 候选的构建、解包、核心源码哈希和禁止项核对结果见 `RELEASE.md`。
 
 “刁难用户”审查至少覆盖：
 
@@ -135,7 +135,7 @@ Remove-Item Env:BEISHU_AUDIO_EVENT_FIXTURES, Env:BEISHU_KEYBOARD_FIXTURES, Env:B
 
 ## 隔离启动开发版
 
-本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.13.1 明确跳过本节及后续全部 UI/CDP 脚本。
+本节会创建 Electron 进程，即使使用 `-WindowStyle Hidden` 仍可能产生窗口、焦点或托盘副作用。用户正在桌面工作时不要运行；本轮 1.13.2 明确跳过本节及后续全部 UI/CDP 脚本。
 
 为每个 UI 测试创建新的数据目录和端口：
 
