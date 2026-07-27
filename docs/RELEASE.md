@@ -83,7 +83,13 @@ $artifacts | Get-FileHash -Algorithm SHA256
 
 将实际字节数和 SHA-256 写入本文件。候选完整通过后，再定点复制这两个 EXE，并把 `docs/USER_GUIDE.md` 复制为 `release-staging\使用说明.md`；确认两份说明完全一致。用户说明不承载构建哈希、内部算法阈值或测试日志。
 
-1.13.4 在本次文档同步时尚未完成隔离候选构建；不得在此预填大小、SHA-256、签名状态、`app.asar` 项数或说明书哈希。实际构建和静态验包完成后再补充，并与 `docs/GITHUB_RELEASE_AUDIT.md` 的附件事实一致。
+1.13.4 隔离候选已于 2026-07-27 完成后台静态核对，未启动任何 EXE：
+
+- 安装版：286,481,852 字节；SHA-256 `0279E7FA5EA1B4A0186D1A5834DE4F0DEEE57EF70EDF2E7C376522DA406E773E`；FileVersion/ProductVersion `1.13.4`；Authenticode `NotSigned`。
+- 便携版：275,818,466 字节；SHA-256 `F700F0116E2A666CBF6630EB12EEA71687EEB620D6F58F0D93163AC4E5BA437F`；FileVersion/ProductVersion `1.13.4`；Authenticode `NotSigned`。
+- 两次构建嵌入的 `app.asar` 一致；最终 `app.asar` 为 149,459,386 字节，SHA-256 `2F3F065B6674E864ED3E8CF96691BB2610FBA1595E02F61AB758C81E4B419BC4`。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；23 个核心源码与当前提交逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
+- `USER_GUIDE.md` 的 SHA-256 为 `2445C3A70C18035412D3873E9EFDFED95CB395164DF4700B1DD59960DC8C6353`；复制到交付目录后须再次确认 `使用说明.md` 内容一致。
 
 1.13.3 隔离候选已于 2026-07-27 完成后台静态核对，未启动任何 EXE：
 
