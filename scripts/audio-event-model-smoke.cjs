@@ -112,6 +112,11 @@ function readWindow(filePath, offsetSeconds = 0) {
     ? wave.samples
     : SpeakerAudio.resampleLinear(wave.samples, wave.sampleRate, SAMPLE_RATE);
   const offset = Math.max(0, Math.round(Number(offsetSeconds) * SAMPLE_RATE) || 0);
+  if (offset >= source.length) {
+    throw new Error(
+      `fixture offset ${offsetSeconds}s is outside ${filePath} (${(source.length / SAMPLE_RATE).toFixed(2)}s)`,
+    );
+  }
   return cropOrRepeat(source.slice(offset));
 }
 
@@ -173,8 +178,12 @@ async function main() {
       assert.equal(fs.statSync(musicPath).isFile(), true, `missing official music fixture: ${musicPath}`);
       const media = readWindow(musicPath);
       const speechFixturePath = process.env.BEISHU_SPEECH_FIXTURE;
+      const configuredSpeechOffset = Number(process.env.BEISHU_SPEECH_OFFSET_SECONDS);
       const speechMedia = speechFixturePath
-        ? readWindow(path.resolve(speechFixturePath), Number(process.env.BEISHU_SPEECH_OFFSET_SECONDS) || 30)
+        ? readWindow(
+          path.resolve(speechFixturePath),
+          Number.isFinite(configuredSpeechOffset) ? configuredSpeechOffset : 0,
+        )
         : null;
       if (speechMedia) {
         const speechResult = await service.classify({ samples: speechMedia, sampleRate: SAMPLE_RATE });

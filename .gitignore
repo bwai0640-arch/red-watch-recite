@@ -7,15 +7,22 @@
 # Local build and release outputs
 /dist/
 /release-staging/
+*.exe
 
 # Runtime data and local speaker profiles (match every nested copy)
 /RedWatchReciteData/
 **/RedWatchReciteData/
 **/speaker-profile.dat*
 **/study-preferences.json
+**/window-preferences.json
+**/TransientElectronData/
+**/SessionData/
+**/Code Cache/
+**/GPUCache/
 
 # Local audit artifacts and real-person test recordings
 /work/
+*.wav
 
 # Local environment files; sanitized examples remain eligible for tracking
 .env

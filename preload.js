@@ -7,7 +7,10 @@ function subscribe(channel, callback) {
   return () => ipcRenderer.removeListener(channel, listener);
 }
 
+const testHooksEnabled = ipcRenderer.sendSync('test-hooks-enabled') === true;
+
 contextBridge.exposeInMainWorld('desktopAPI', {
+  testHooksEnabled,
   getBackgroundPreference: () => ipcRenderer.invoke('background-preference:get'),
   setBackgroundPreference: (mode) => ipcRenderer.invoke('background-preference:set', { mode }),
   getStudySettings: () => ipcRenderer.invoke('study-settings:get'),
@@ -26,10 +29,11 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   getSpeakerState: () => ipcRenderer.invoke('speaker:get-state'),
   beginSpeakerEnrollment: (payload) => ipcRenderer.invoke('speaker:begin-enrollment', payload),
   addSpeakerEnrollmentSample: (payload) => ipcRenderer.invoke('speaker:add-enrollment-sample', payload),
-  finishSpeakerEnrollment: () => ipcRenderer.invoke('speaker:finish-enrollment'),
-  cancelSpeakerEnrollment: () => ipcRenderer.invoke('speaker:cancel-enrollment'),
+  finishSpeakerEnrollment: (enrollmentId) => ipcRenderer.invoke('speaker:finish-enrollment', { enrollmentId }),
+  cancelSpeakerEnrollment: (enrollmentId) => ipcRenderer.invoke('speaker:cancel-enrollment', { enrollmentId }),
   verifySpeaker: (payload) => ipcRenderer.invoke('speaker:verify', payload),
   deleteSpeakerProfile: (profileId) => ipcRenderer.invoke('speaker:delete-profile', { profileId }),
+  deleteSpeakerProfileArtifact: () => ipcRenderer.invoke('speaker:delete-profile-artifact'),
   getAudioEventState: () => ipcRenderer.invoke('audio-event:get-state'),
   classifyAudioEvents: (payload) => ipcRenderer.invoke('audio-event:classify', payload),
   quitApp: () => ipcRenderer.invoke('quit-app'),
@@ -44,6 +48,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   },
   onWindowCloseRequested: (callback) => {
     return subscribe('window-close-requested', callback);
+  },
+  onSystemInterruption: (callback) => {
+    return subscribe('system-interruption', callback);
   },
 });
 

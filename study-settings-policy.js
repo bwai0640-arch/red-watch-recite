@@ -5,6 +5,7 @@ const fsPromises = require('node:fs/promises');
 const path = require('node:path');
 
 const SETTINGS_SCHEMA_VERSION = 1;
+const MAX_SETTINGS_FILE_BYTES = 64 * 1024;
 const STUDY_MODES = Object.freeze(['recite', 'study']);
 const DEFAULT_STUDY_SETTINGS = Object.freeze({
   mode: 'recite',
@@ -71,6 +72,13 @@ function validateStudySettingsPayload(payload) {
 
 function readStudySettings(filePath) {
   try {
+    const stats = fs.lstatSync(filePath);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_SETTINGS_FILE_BYTES) {
+      return {
+        exists: true,
+        settings: { ...DEFAULT_STUDY_SETTINGS },
+      };
+    }
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     return { exists: true, settings: normalizeStudySettings(parsed) };
   } catch (error) {
@@ -101,6 +109,7 @@ async function writeStudySettings(filePath, payload) {
 
 module.exports = {
   DEFAULT_STUDY_SETTINGS,
+  MAX_SETTINGS_FILE_BYTES,
   SETTINGS_SCHEMA_VERSION,
   normalizeStudySettings,
   readStudySettings,

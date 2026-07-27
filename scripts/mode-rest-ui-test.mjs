@@ -673,11 +673,110 @@ if (-not [BeishuCursorRestore]::SetCursorPos(${Math.round(point.x)}, ${Math.roun
 `);
 }
 
+async function clickProcessWindowAtFraction(processId, point) {
+  assert(Number.isInteger(processId) && processId > 0, 'Invalid source process id');
+  assert(
+    Number.isFinite(point?.x) && point.x > 0 && point.x < 1
+      && Number.isFinite(point?.y) && point.y > 0 && point.y < 1,
+    `Invalid native click fraction: ${JSON.stringify(point)}`,
+  );
+  const xMillionths = Math.round(point.x * 1_000_000);
+  const yMillionths = Math.round(point.y * 1_000_000);
+  await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class BeishuNativeClick {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  private static uint targetProcessId;
+  private static readonly List<IntPtr> visibleWindows = new List<IntPtr>();
+  private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [DllImport("user32.dll")]
+  private static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+  public static void Click(uint processId, int xMillionths, int yMillionths) {
+    if (SetThreadDpiAwarenessContext(PerMonitorAwareV2) == IntPtr.Zero) {
+      throw new InvalidOperationException("Unable to enter a per-monitor DPI-aware coordinate context.");
+    }
+    targetProcessId = processId;
+    visibleWindows.Clear();
+    EnumWindows(InspectWindow, IntPtr.Zero);
+    if (visibleWindows.Count != 1) {
+      throw new InvalidOperationException(
+        "Expected exactly one visible top-level source window, found " + visibleWindows.Count + "."
+      );
+    }
+    RECT rect;
+    if (!GetWindowRect(visibleWindows[0], out rect)) {
+      throw new InvalidOperationException("Unable to inspect native window bounds.");
+    }
+    int width = rect.Right - rect.Left;
+    int height = rect.Bottom - rect.Top;
+    int x = rect.Left + (int)Math.Round(width * (xMillionths / 1000000.0));
+    int y = rect.Top + (int)Math.Round(height * (yMillionths / 1000000.0));
+    if (!SetCursorPos(x, y)) {
+      throw new InvalidOperationException("Unable to move the native cursor to the action.");
+    }
+    Thread.Sleep(80);
+    const uint LeftDown = 0x0002;
+    const uint LeftUp = 0x0004;
+    mouse_event(LeftDown, 0, 0, 0, UIntPtr.Zero);
+    Thread.Sleep(60);
+    mouse_event(LeftUp, 0, 0, 0, UIntPtr.Zero);
+  }
+
+  private static bool InspectWindow(IntPtr hWnd, IntPtr lParam) {
+    uint processId;
+    RECT rect;
+    GetWindowThreadProcessId(hWnd, out processId);
+    if (processId != targetProcessId || !IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out rect)) {
+      return true;
+    }
+    if (rect.Right > rect.Left && rect.Bottom > rect.Top) visibleWindows.Add(hWnd);
+    return true;
+  }
+}
+'@
+[BeishuNativeClick]::Click([uint32]${processId}, ${xMillionths}, ${yMillionths})
+`);
+}
+
 const isolatedRoot = fs.mkdtempSync(path.join(workRoot, 'mode-rest-ui-'));
 const debugPort = await reserveDebugPort();
 const childEnvironment = {
   ...process.env,
   SUPERVISION_DATA_DIR: isolatedRoot,
+  SUPERVISION_TEST_HOOKS: '1',
 };
 delete childEnvironment.ELECTRON_RUN_AS_NODE;
 
@@ -853,7 +952,7 @@ try {
     `Floating canvas is not 16:9: ${JSON.stringify(report.floatingShell)}`);
   assert(report.floatingShell.dragRegions.statusbar === 'drag'
     && report.floatingShell.dragRegions.canvas === 'drag'
-    && report.floatingShell.dragRegions.hoverTools === 'drag'
+    && report.floatingShell.dragRegions.hoverTools === 'no-drag'
     && report.floatingShell.dragRegions.timer === 'drag'
     && report.floatingShell.dragRegions.hideButton === 'no-drag'
     && report.floatingShell.dragRegions.expandButton === 'no-drag',
@@ -861,13 +960,27 @@ try {
 
   await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
   await wait(300);
-  report.floatingHover = await main.evaluate(`(async () => ({
-    opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
-    timer: document.querySelector('#floating-timer').textContent.trim(),
-    hideVisible: document.querySelector('#floating-hide-button').getClientRects().length > 0,
-    expandVisible: document.querySelector('#floating-expand-button').getClientRects().length > 0,
-    runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
-  }))()`);
+  report.floatingHover = await main.evaluate(`(async () => {
+    const hideRect = document.querySelector('#floating-hide-button').getBoundingClientRect();
+    const expandRect = document.querySelector('#floating-expand-button').getBoundingClientRect();
+    return {
+      opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+      timer: document.querySelector('#floating-timer').textContent.trim(),
+      hideVisible: hideRect.width > 0 && hideRect.height > 0,
+      expandVisible: expandRect.width > 0 && expandRect.height > 0,
+      runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
+      hitPoints: {
+        hide: {
+          x: (hideRect.left + hideRect.width / 2) / innerWidth,
+          y: (hideRect.top + hideRect.height / 2) / innerHeight,
+        },
+        expand: {
+          x: (expandRect.left + expandRect.width / 2) / innerWidth,
+          y: (expandRect.top + expandRect.height / 2) / innerHeight,
+        },
+      },
+    };
+  })()`);
   assert(report.floatingHover.opacity === '1'
     && report.floatingHover.runtimeHovered
     && /^已学习 \\d{2}:\\d{2}(?::\\d{2})?$/.test(report.floatingHover.timer)
@@ -882,8 +995,22 @@ try {
   }))()`);
   assert(report.floatingLeave.opacity === '0' && !report.floatingLeave.runtimeHovered,
     `Floating hover tools did not hide after the real cursor left: ${JSON.stringify(report.floatingLeave)}`);
-  await restoreSystemCursor(originalSystemCursor);
-  originalSystemCursor = null;
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
+  await clickProcessWindowAtFraction(appProcess.pid, report.floatingHover.hitPoints.hide);
+  report.floatingHidden = await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'hidden' && !state.visible,
+  );
+  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
+  await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'floating' && state.visible,
+  );
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
 
   report.floatingAlertReturn = await main.evaluate(`(async () => {
     const revealed = await window.desktopAPI.revealForInlineAlert();
@@ -904,7 +1031,19 @@ try {
     && !report.floatingAlertReturn.returned.maximizable,
   `Floating alert did not return to the same compact contract: ${JSON.stringify(report.floatingAlertReturn)}`);
 
-  await main.evaluate(`document.querySelector('#floating-expand-button').click()`);
+  await waitForEvaluation(
+    main,
+    `getComputedStyle(document.querySelector('.floating-hover-tools')).opacity`,
+    (opacity) => opacity === '1',
+  );
+  report.floatingExpandPoint = await main.evaluate(`(() => {
+    const rect = document.querySelector('#floating-expand-button').getBoundingClientRect();
+    return {
+      x: (rect.left + rect.width / 2) / innerWidth,
+      y: (rect.top + rect.height / 2) / innerHeight,
+    };
+  })()`);
+  await clickProcessWindowAtFraction(appProcess.pid, report.floatingExpandPoint);
   report.floatingShell.restored = await waitForEvaluation(
     main,
     `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
@@ -916,20 +1055,8 @@ try {
     && report.floatingShell.restored.minimizable
     && report.floatingShell.restored.maximizable,
   `Floating expand did not restore the scene contract: ${JSON.stringify(report.floatingShell)}`);
-
-  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
-  await waitForEvaluation(
-    main,
-    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
-    (state) => state.mode === 'floating',
-  );
-  await main.evaluate(`document.querySelector('#floating-hide-button').click()`);
-  report.floatingHidden = await waitForEvaluation(
-    main,
-    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
-    (state) => state.mode === 'hidden' && !state.visible,
-  );
-  await main.evaluate(`window.desktopAPI.restoreSceneMode()`);
+  await restoreSystemCursor(originalSystemCursor);
+  originalSystemCursor = null;
 
   report.windowChrome = await main.evaluate(`(() => {
     const titlebar = document.querySelector('#window-titlebar');
@@ -1919,16 +2046,18 @@ try {
     };
     const decoded = {};
     for (const [name, value] of Object.entries(encoded)) decoded[name] = await decode(value);
-    await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollmentId = enrollment.enrollmentId;
     const names = [...Object.keys(decoded), ...Object.keys(decoded), ...Object.keys(decoded)].slice(0, 8);
     for (const name of names) {
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId,
         source: 'mic',
         samples: decoded[name],
         sampleRate: 16000,
       });
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(enrollmentId);
     await refreshSpeakerState();
     await context.close();
     return { profile, rendererProfile: state.speakerProfileExists };
@@ -1946,13 +2075,13 @@ try {
     const alerts = state.alerts;
     const lives = state.lives;
     state.speakerVerificationPending = true;
-    state.silentSince = Date.now() - violationLimitMs();
+    state.silentSince = monotonicNow() - violationLimitMs();
     pollMicrophone();
     const withinGrace = {
       snapshot: window.__beishuTest.getSnapshot(),
       status: document.querySelector('#preflight-test-status').textContent.trim(),
     };
-    state.silentSince = Date.now() - violationLimitMs() - SPEAKER_DEADLINE_GRACE_MS - 50;
+    state.silentSince = monotonicNow() - violationLimitMs() - SPEAKER_DEADLINE_GRACE_MS - 50;
     pollMicrophone();
     const afterGrace = {
       snapshot: window.__beishuTest.getSnapshot(),
@@ -1968,7 +2097,7 @@ try {
       snapshot: window.__beishuTest.getSnapshot(),
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
-      silentForMs: Date.now() - state.silentSince,
+      silentForMs: monotonicNow() - state.silentSince,
       persisted: persistedSettings.settings.reciteSilenceSeconds,
     };
     pollMicrophone();

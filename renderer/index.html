@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#160c0b" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
     <title>凛冬督学局</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -28,12 +28,12 @@
       <div class="floating-status-copy">
         <output id="floating-voice-state" class="floating-voice-state" aria-live="polite">未检测</output>
       </div>
-      <div class="floating-hover-tools">
-        <output id="floating-timer" class="floating-timer" aria-label="本次有效学习时长">已学习 00:00</output>
-        <button id="floating-hide-button" class="floating-action" type="button" aria-label="完全隐藏窗口">隐藏</button>
-        <button id="floating-expand-button" class="floating-action" type="button" aria-label="放大窗口">放大</button>
-      </div>
     </section>
+    <div class="floating-hover-tools" aria-label="漂浮窗操作">
+      <output id="floating-timer" class="floating-timer" aria-label="本次有效学习时长">已学习 00:00</output>
+      <button id="floating-hide-button" class="floating-action" type="button" aria-label="完全隐藏窗口">隐藏</button>
+      <button id="floating-expand-button" class="floating-action" type="button" aria-label="放大窗口">放大</button>
+    </div>
 
     <section id="study-scene" class="study-scene" aria-label="督学动画场景">
       <canvas id="study-scene-canvas"></canvas>

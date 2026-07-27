@@ -11,6 +11,7 @@ const appSource = read('renderer/app.js');
 const htmlSource = read('renderer/index.html');
 const breakPromptHtmlSource = read('renderer/break-prompt.html');
 const cssSource = read('renderer/styles.css');
+const modeRestUiSource = read('scripts/mode-rest-ui-test.mjs');
 const packageSource = read('package.json');
 const packageConfig = JSON.parse(packageSource);
 
@@ -195,14 +196,22 @@ assert.match(preloadSource, /forceRestoreSceneMode/);
 assert.match(preloadSource, /onWindowCloseRequested/);
 assert.match(preloadSource, /onFloatingHoverChanged:[\s\S]*?subscribe\('floating-hover-changed'/);
 assert.doesNotMatch(preloadSource, /ipcRenderer\.send\([^)]*floating/);
+assert.match(mainSource, /const hasSingleInstanceLock = app\.requestSingleInstanceLock\(\)/);
+assert.match(mainSource, /app\.on\('second-instance',[\s\S]*?showSceneWindow\(\)\.catch/);
+assert.match(mainSource, /if \(hasSingleInstanceLock\) app\.whenReady\(\)\.then/);
 
-const floatingMarkup = htmlSource.match(/<section id="floating-statusbar"[\s\S]*?<\/section>/)?.[0] || '';
-assert.match(floatingMarkup, /id="floating-voice-state"/);
-assert.doesNotMatch(floatingMarkup, /id="floating-anomaly-time"/);
-assert.match(floatingMarkup, /id="floating-timer"/);
-assert.match(floatingMarkup, /id="floating-hide-button"[^>]*>隐藏<\/button>/);
-assert.match(floatingMarkup, /id="floating-expand-button"[^>]*>放大<\/button>/);
-assert.doesNotMatch(floatingMarkup, /meter|volume|threshold/i);
+const floatingStatusMarkup = htmlSource.match(/<section id="floating-statusbar"[\s\S]*?<\/section>/)?.[0] || '';
+const floatingToolsMarkup = htmlSource.match(/<div class="floating-hover-tools"[\s\S]*?<\/div>/)?.[0] || '';
+assert.match(floatingStatusMarkup, /id="floating-voice-state"/);
+assert.doesNotMatch(floatingStatusMarkup, /id="floating-anomaly-time"/);
+assert.match(floatingToolsMarkup, /id="floating-timer"/);
+assert.match(floatingToolsMarkup, /id="floating-hide-button"[^>]*>隐藏<\/button>/);
+assert.match(floatingToolsMarkup, /id="floating-expand-button"[^>]*>放大<\/button>/);
+assert.doesNotMatch(`${floatingStatusMarkup}${floatingToolsMarkup}`, /meter|volume|threshold/i);
+assert.match(
+  htmlSource,
+  /<section id="floating-statusbar"[\s\S]*?<\/section>\s*<div class="floating-hover-tools"[\s\S]*?<\/div>\s*<section id="study-scene"/,
+);
 assert.doesNotMatch(htmlSource, /floating-threshold|voice-threshold|volume-threshold/);
 assert.doesNotMatch(appSource, /floatingVoiceThreshold|voiceThreshold|thresholdMarker/);
 assert.doesNotMatch(cssSource, /\.floating-threshold-control|\.threshold-marker/);
@@ -226,10 +235,19 @@ assert.ok(
   96 + (40 * 2) + (4 * 2) + (6 * 2) <= 224,
   'the hover timer and both actions must fit the minimum floating width',
 );
-assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*-webkit-app-region: drag/);
+assert.match(cssSource, /body\[data-window-mode="floating"\] \.floating-hover-tools\s*\{[^}]*position: fixed[^}]*z-index: 13[^}]*-webkit-app-region: no-drag/);
+assert.match(cssSource, /\.floating-timer\s*\{[^}]*-webkit-app-region: drag/);
 assert.match(cssSource, /\.floating-action\s*\{[^}]*-webkit-app-region: no-drag/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene\s*\{[^}]*-webkit-app-region: drag/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas\s*\{[^}]*-webkit-app-region: drag/);
+assert.match(modeRestUiSource, /function clickProcessWindowAtFraction\(/);
+assert.match(modeRestUiSource, /clickProcessWindowAtFraction\(appProcess\.pid, report\.floatingHover\.hitPoints\.hide\)/);
+assert.match(modeRestUiSource, /clickProcessWindowAtFraction\(appProcess\.pid, report\.floatingExpandPoint\)/);
+assert.doesNotMatch(modeRestUiSource, /querySelector\('#floating-(?:hide|expand)-button'\)\.click\(\)/);
+assert.match(
+  appSource,
+  /runtime\?\.mode === 'floating' && runtime\?\.floatingHovered === true/,
+);
 assert.match(cssSource, /\.background-action-menu\s*\{[^}]*top: calc\(100% - 1px\)[^}]*bottom: auto[^}]*grid-template-columns: minmax\(0, 1fr\)/);
 assert.match(cssSource, /\.actions\s*\{[^}]*align-items: start/);
 assert.match(cssSource, /body\.scene-mode:not\(\.controls-open\) \.background-action\.menu-open \.background-action-menu\s*\{[^}]*position: static[^}]*margin-top: 4px[^}]*transform: none/);
@@ -240,7 +258,7 @@ assert.match(cssSource, /\.background-action\.menu-open \.background-action-menu
 assert.match(cssSource, /#background-button:disabled \+ \.background-action-menu\s*\{ display: none; \}/);
 
 assert.match(appSource, /UI\.floatingVoiceState\.textContent = text/);
-assert.match(appSource, /function rejectedSpeakerStatus\(now = Date\.now\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
+assert.match(appSource, /function rejectedSpeakerStatus\(now = monotonicNow\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
 assert.match(appSource, /state\.lastSpeakerRejected \? rejectedSpeakerStatus\(now\) : '正在复核本人声音'/);
 assert.match(
   appSource,

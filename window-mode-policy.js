@@ -6,6 +6,7 @@ const BACKGROUND_MODES = Object.freeze(['hidden', 'floating']);
 const WINDOW_MODES = Object.freeze(['scene', 'hidden', 'floating', 'alert']);
 const RETURN_DISPOSITIONS = Object.freeze(['return', 'scene']);
 const DEFAULT_BACKGROUND_MODE = 'hidden';
+const MAX_PREFERENCE_FILE_BYTES = 64 * 1024;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -171,6 +172,8 @@ function floatingWindowBounds(workArea, {
 
 function readPreferenceDocument(filePath) {
   try {
+    const stats = fs.lstatSync(filePath);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > MAX_PREFERENCE_FILE_BYTES) return {};
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     return isPlainObject(parsed) ? parsed : {};
   } catch {
@@ -233,6 +236,7 @@ async function writeFloatingWindowSize(filePath, size) {
 module.exports = {
   BACKGROUND_MODES,
   DEFAULT_BACKGROUND_MODE,
+  MAX_PREFERENCE_FILE_BYTES,
   WINDOW_MODES,
   clampFloatingBounds,
   floatingWindowBounds,

@@ -1,6 +1,6 @@
 {
   "name": "red-watch-recite",
-  "version": "1.13.3",
+  "version": "1.13.4",
   "description": "凛冬督学局：本地背书与安静自习监督桌面应用",
   "main": "main.js",
   "author": "原作：叛逆蓝牙 · 二创：眼泪斷了线",
@@ -8,8 +8,8 @@
   "private": true,
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder --win nsis",
-    "dist:installer": "electron-builder --win nsis",
+    "dist": "node scripts/build-release.cjs",
+    "dist:installer": "node scripts/build-release.cjs",
     "test:window-modes": "node scripts/window-mode-policy-test.cjs && node scripts/floating-window-source-test.cjs",
     "test:speaker-runtime": "node scripts/speaker-runtime-policy-test.cjs && node scripts/speaker-service-test.cjs",
     "test:adversarial": "node scripts/adversarial-user-simulation-test.cjs",

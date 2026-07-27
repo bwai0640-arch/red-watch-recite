@@ -7,6 +7,7 @@ const path = require('node:path');
 
 const {
   DEFAULT_STUDY_SETTINGS,
+  MAX_SETTINGS_FILE_BYTES,
   normalizeStudySettings,
   readStudySettings,
   validateStudySettingsPayload,
@@ -79,6 +80,12 @@ const settingsPath = path.join(temporaryRoot, 'study-preferences.json');
     assert.deepEqual(readStudySettings(settingsPath), { exists: true, settings: replacement });
 
     fs.writeFileSync(settingsPath, '{corrupt', 'utf8');
+    assert.deepEqual(readStudySettings(settingsPath), {
+      exists: true,
+      settings: { ...DEFAULT_STUDY_SETTINGS },
+    });
+
+    fs.truncateSync(settingsPath, MAX_SETTINGS_FILE_BYTES + 1);
     assert.deepEqual(readStudySettings(settingsPath), {
       exists: true,
       settings: { ...DEFAULT_STUDY_SETTINGS },

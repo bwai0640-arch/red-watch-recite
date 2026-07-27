@@ -90,9 +90,13 @@ const exactSourceFiles = [
   'audio-event-worker.js',
   'renderer/adaptive-vad.js',
   'renderer/app.js',
+  'renderer/break-prompt.css',
+  'renderer/break-prompt.html',
+  'renderer/break-prompt.js',
   'renderer/index.html',
   'renderer/media-player.js',
   'renderer/scene-rules.js',
+  'renderer/speaker-capture-worklet.js',
   'renderer/speaker-audio.js',
   'renderer/study-policy.js',
   'renderer/styles.css',
@@ -111,6 +115,30 @@ assert.equal(sourcePackage.build.appId, 'top.redwatch.study-supervisor');
 assert.equal(sourcePackage.build.productName, '凛冬督学局');
 assert.equal(sourcePackage.build.win.artifactName, '凛冬督学局-安装版-${version}.exe');
 assert.equal(sourcePackage.build.nsis.shortcutName, '凛冬督学局');
+const packedMainSource = extract('main.js').toString('utf8');
+const packedPreloadSource = extract('preload.js').toString('utf8');
+const packedRendererSource = extract('renderer', 'app.js').toString('utf8');
+assert.match(
+  packedMainSource,
+  /const testHooksEnabled = !app\.isPackaged[\s\S]*SUPERVISION_TEST_HOOKS === '1'/,
+  'Packaged test hooks must require both a development build and an explicit opt-in.',
+);
+assert.match(packedMainSource, /devTools: !app\.isPackaged/);
+assert.match(
+  packedMainSource,
+  /if \(app\.isPackaged\)[\s\S]*?removeSwitch\('remote-debugging-port'\)[\s\S]*?removeSwitch\('remote-debugging-pipe'\)/,
+);
+assert.match(
+  packedMainSource,
+  /ipcMain\.on\('test-hooks-enabled'[\s\S]*?event\.returnValue = Boolean\([\s\S]*?testHooksEnabled/,
+);
+assert.match(packedPreloadSource, /ipcRenderer\.sendSync\('test-hooks-enabled'\) === true/);
+assert.doesNotMatch(packedPreloadSource, /process\.argv\.includes\('--supervision-test-hooks'\)/);
+assert.doesNotMatch(packedMainSource, /additionalArguments:[\s\S]*supervision-test-hooks/);
+assert.match(
+  packedRendererSource,
+  /if \(window\.desktopAPI\.testHooksEnabled\) window\.__beishuTest = Object\.freeze/,
+);
 
 const expectedArtifacts = [
   path.join(candidateRoot, `凛冬督学局-安装版-${sourcePackage.version}.exe`),

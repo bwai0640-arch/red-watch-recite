@@ -6,6 +6,7 @@ const path = require('node:path');
 const {
   clampFloatingBounds,
   floatingWindowBounds,
+  MAX_PREFERENCE_FILE_BYTES,
   normalizeFloatingWindowSize,
   pointInsideBounds,
   readBackgroundPreference,
@@ -168,6 +169,17 @@ async function main() {
       }),
       { width: 320, height: 225 },
       'corrupt preferences must fall back to the current maximum/default size',
+    );
+    fs.truncateSync(preferencePath, MAX_PREFERENCE_FILE_BYTES + 1);
+    assert.equal(readBackgroundPreference(preferencePath), 'hidden');
+    assert.deepEqual(
+      readFloatingWindowSize(preferencePath, {
+        defaultSize: { width: 320, height: 225 },
+        minimumSize: { width: 224, height: 170 },
+        maximumSize: { width: 320, height: 225 },
+      }),
+      { width: 320, height: 225 },
+      'oversized preferences must fall back without loading the file into memory',
     );
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });

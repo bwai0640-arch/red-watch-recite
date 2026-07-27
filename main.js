@@ -5,6 +5,7 @@ const {
   Menu,
   Tray,
   nativeImage,
+  powerMonitor,
   protocol,
   screen,
   session,
@@ -42,6 +43,14 @@ const breakPromptRendererUrl = 'rwt://renderer/break-prompt.html';
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-http-cache');
 app.setName('凛冬督学局');
+if (app.isPackaged) {
+  app.commandLine.removeSwitch('remote-debugging-port');
+  app.commandLine.removeSwitch('remote-debugging-pipe');
+}
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+const testHooksEnabled = !app.isPackaged
+  && process.env.SUPERVISION_TEST_HOOKS === '1';
 
 // Keep the legacy data directory stable across the visible product rename. It
 // may contain the user's existing encrypted speaker profile and preferences.
@@ -52,10 +61,44 @@ app.setPath('userData', persistentDataRoot);
 const windowPreferencePath = path.join(persistentDataRoot, 'window-preferences.json');
 const studySettingsPath = path.join(persistentDataRoot, 'study-preferences.json');
 const transientSessionParent = path.join(persistentDataRoot, 'TransientElectronData');
+
+function removeTransientPathNoFollow(target) {
+  const stats = fsSync.lstatSync(target);
+  if (stats.isSymbolicLink()) {
+    fsSync.unlinkSync(target);
+  } else if (stats.isDirectory()) {
+    fsSync.rmSync(target, { recursive: true, force: true });
+  } else {
+    fsSync.unlinkSync(target);
+  }
+}
+
+try {
+  const transientParentStats = fsSync.lstatSync(transientSessionParent);
+  if (!transientParentStats.isDirectory() || transientParentStats.isSymbolicLink()) {
+    removeTransientPathNoFollow(transientSessionParent);
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 fsSync.mkdirSync(transientSessionParent, { recursive: true });
 
 for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: true })) {
-  if (!entry.isDirectory() || !/^run-(\d+)$/.test(entry.name)) continue;
+  if (!/^run-(\d+)$/.test(entry.name)) continue;
+  const stalePath = path.join(transientSessionParent, entry.name);
+  let staleStats;
+  try {
+    staleStats = fsSync.lstatSync(stalePath);
+  } catch {
+    continue;
+  }
+  if (staleStats.isSymbolicLink()) {
+    try {
+      fsSync.unlinkSync(stalePath);
+    } catch {}
+    continue;
+  }
+  if (!staleStats.isDirectory()) continue;
   const stalePid = Number(entry.name.slice('run-'.length));
   let stillRunning = false;
   try {
@@ -63,11 +106,18 @@ for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: 
     stillRunning = true;
   } catch {}
   if (!stillRunning) {
-    fsSync.rmSync(path.join(transientSessionParent, entry.name), { recursive: true, force: true });
+    try {
+      removeTransientPathNoFollow(stalePath);
+    } catch {}
   }
 }
 
 const transientSessionDataRoot = path.join(transientSessionParent, `run-${process.pid}`);
+try {
+  removeTransientPathNoFollow(transientSessionDataRoot);
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 fsSync.mkdirSync(transientSessionDataRoot, { recursive: true });
 // userData remains pinned to the legacy stable directory for Windows
 // safeStorage. Only sessionData is per-run and cleaned on exit, so browser
@@ -112,6 +162,9 @@ let windowModeTransitionSequence = 0;
 let windowTransitionChain = Promise.resolve();
 let backgroundPreferenceWriteChain = Promise.resolve();
 let studySettingsWriteChain = Promise.resolve();
+let quitFlushInProgress = false;
+let quitFlushComplete = false;
+let rendererUnresponsiveTimer = null;
 const pendingWindowModeTransitions = new Map();
 let backgroundPreference = readBackgroundPreference(windowPreferencePath);
 let studySettingsState = readStudySettings(studySettingsPath);
@@ -126,6 +179,7 @@ const floatingWindowMinimumSize = Object.freeze({ width: 224, height: 170 });
 const floatingWindowMargin = 16;
 const floatingHoverPollIntervalMs = 80;
 const windowModeRenderTimeoutMs = 1000;
+const rendererUnresponsiveRecoveryMs = 10_000;
 
 floatingPreferredSize = readFloatingWindowSize(windowPreferencePath, {
   defaultSize: floatingWindowSize,
@@ -153,7 +207,12 @@ function registerLocalProtocol(targetSession) {
     const root = roots[url.hostname];
     if (!root) return new Response('Not found', { status: 404 });
 
-    const relativePath = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '');
+    let relativePath;
+    try {
+      relativePath = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '');
+    } catch {
+      return new Response('Bad request', { status: 400 });
+    }
     const resolved = path.resolve(root, relativePath);
     const relative = path.relative(root, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -168,7 +227,6 @@ function registerLocalProtocol(targetSession) {
         headers: {
           'Content-Type': type,
           'Cache-Control': 'no-store',
-          'Access-Control-Allow-Origin': '*',
         },
       });
     } catch {
@@ -380,6 +438,7 @@ function createBreakPromptWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       backgroundThrottling: false,
       spellcheck: false,
       v8CacheOptions: 'none',
@@ -426,6 +485,12 @@ function destroyBreakPromptWindow() {
 function sendWindowMode(mode, extra = {}) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('window-mode-changed', { mode, ...extra });
+}
+
+function sendSystemInterruption(reason) {
+  const contents = mainWindow?.webContents;
+  if (!contents || contents.isDestroyed() || contents.isLoadingMainFrame()) return;
+  contents.send('system-interruption', { reason });
 }
 
 function requestWindowModeRender(mode, extra = {}) {
@@ -514,6 +579,40 @@ function sendWindowMaximized() {
   });
 }
 
+function recoverMainWindow(window, reason) {
+  if (isQuitting || !window || window !== mainWindow) return;
+  console.error(`[window] renderer recovery: ${reason}`);
+  if (rendererUnresponsiveTimer) {
+    clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = null;
+  }
+  stopFloatingHoverTracking();
+  clearPendingWindowModeTransitions();
+  inlineAlertState = null;
+  breakPromptState = null;
+  breakPromptSuppressedForAlert = false;
+  destroyBreakPromptWindow();
+  mainWindowMode = 'scene';
+  const enrollmentId = speakerService?.getState().enrollmentId;
+  if (enrollmentId) {
+    speakerService.cancelEnrollment({ enrollmentId }).catch((error) => {
+      console.error('[speaker] unable to cancel enrollment during renderer recovery:', error);
+    });
+  }
+
+  const reopen = () => {
+    if (isQuitting || mainWindow) return;
+    createMainWindow();
+  };
+  if (window.isDestroyed()) {
+    mainWindow = null;
+    setTimeout(reopen, 0);
+    return;
+  }
+  window.once('closed', () => setTimeout(reopen, 0));
+  window.destroy();
+}
+
 function createMainWindow() {
   const bounds = fitPresentationBounds(screen.getPrimaryDisplay());
   mainWindow = new BrowserWindow({
@@ -536,15 +635,32 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       backgroundThrottling: false,
       spellcheck: false,
       v8CacheOptions: 'none',
     },
   });
   unrestrictedWindowMaximumSize = mainWindow.getMaximumSize();
+  const createdWindow = mainWindow;
 
   lockWebContentsNavigation(mainWindow.webContents, mainRendererUrl);
   mainWindow.loadURL(mainRendererUrl);
+  createdWindow.webContents.on('render-process-gone', (_event, details) => {
+    recoverMainWindow(createdWindow, details?.reason || 'render-process-gone');
+  });
+  createdWindow.on('unresponsive', () => {
+    if (rendererUnresponsiveTimer) clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = setTimeout(() => {
+      rendererUnresponsiveTimer = null;
+      recoverMainWindow(createdWindow, 'unresponsive');
+    }, rendererUnresponsiveRecoveryMs);
+  });
+  createdWindow.on('responsive', () => {
+    if (!rendererUnresponsiveTimer) return;
+    clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = null;
+  });
   mainWindow.once('ready-to-show', () => {
     mainWindowMode = 'scene';
     mainWindow.show();
@@ -594,6 +710,10 @@ function createMainWindow() {
     if (mainWindowMode === 'floating') persistFloatingWindowSize();
   });
   mainWindow.on('closed', () => {
+    if (rendererUnresponsiveTimer) {
+      clearTimeout(rendererUnresponsiveTimer);
+      rendererUnresponsiveTimer = null;
+    }
     stopFloatingHoverTracking();
     clearPendingWindowModeTransitions();
     mainWindow = null;
@@ -825,7 +945,7 @@ function runtimeCacheState() {
 
 function clearTransientSessionData() {
   try {
-    fsSync.rmSync(transientSessionDataRoot, { recursive: true, force: true });
+    removeTransientPathNoFollow(transientSessionDataRoot);
     fsSync.rmdirSync(transientSessionParent);
   } catch (error) {
     if (error?.code !== 'ENOTEMPTY' && error?.code !== 'ENOENT') {
@@ -952,13 +1072,17 @@ function registerSpeakerIpc() {
     }
   };
 
-  ipcMain.handle('speaker:get-state', trustedHandler(() => speakerService.getState()));
+  ipcMain.handle('speaker:get-state', trustedHandler(async () => {
+    await speakerService.initialize();
+    return speakerService.getState();
+  }));
   ipcMain.handle('speaker:begin-enrollment', trustedHandler((payload) => speakerService.beginEnrollment(payload)));
   ipcMain.handle('speaker:add-enrollment-sample', trustedHandler((payload) => speakerService.addEnrollmentSample(payload)));
-  ipcMain.handle('speaker:finish-enrollment', trustedHandler(() => speakerService.finishEnrollment()));
-  ipcMain.handle('speaker:cancel-enrollment', trustedHandler(() => speakerService.cancelEnrollment()));
+  ipcMain.handle('speaker:finish-enrollment', trustedHandler((payload) => speakerService.finishEnrollment(payload)));
+  ipcMain.handle('speaker:cancel-enrollment', trustedHandler((payload) => speakerService.cancelEnrollment(payload)));
   ipcMain.handle('speaker:verify', trustedHandler((payload) => speakerService.verify(payload)));
   ipcMain.handle('speaker:delete-profile', trustedHandler((payload) => speakerService.deleteProfile(payload?.profileId)));
+  ipcMain.handle('speaker:delete-profile-artifact', trustedHandler(() => speakerService.deleteProfileArtifact()));
 }
 
 function registerAudioEventIpc() {
@@ -972,7 +1096,10 @@ function registerAudioEventIpc() {
     }
   };
 
-  ipcMain.handle('audio-event:get-state', trustedHandler(() => audioEventService.getState()));
+  ipcMain.handle('audio-event:get-state', trustedHandler(async () => {
+    await audioEventService.initialize();
+    return audioEventService.getState();
+  }));
   ipcMain.handle('audio-event:classify', trustedHandler((payload) => audioEventService.classify(payload)));
 }
 
@@ -1011,15 +1138,22 @@ function registerBreakPromptIpc() {
   });
 }
 
-app.whenReady().then(async () => {
+app.on('second-instance', () => {
+  if (!hasSingleInstanceLock || !app.isReady() || !mainWindow || mainWindow.isDestroyed()) return;
+  showSceneWindow().catch((error) => {
+    console.error('[window] unable to restore the existing instance:', error);
+  });
+});
+
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   runtimeSession = session.fromPartition(runtimeSessionPartition, { cache: false });
   registerLocalProtocol(runtimeSession);
   runtimeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => (
     permission === 'media'
     && details?.mediaType === 'audio'
-      && webContents?.getURL() === mainRendererUrl
+    && webContents?.getURL() === mainRendererUrl
     && typeof requestingOrigin === 'string'
-    && requestingOrigin.startsWith('rwt://renderer')
+    && requestingOrigin === 'rwt://renderer'
   ));
   runtimeSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
@@ -1030,6 +1164,10 @@ app.whenReady().then(async () => {
       && mediaTypes.every((type) => type === 'audio'),
     );
   });
+  powerMonitor.on('suspend', () => sendSystemInterruption('suspend'));
+  powerMonitor.on('resume', () => sendSystemInterruption('resume'));
+  powerMonitor.on('lock-screen', () => sendSystemInterruption('lock-screen'));
+  powerMonitor.on('unlock-screen', () => sendSystemInterruption('unlock-screen'));
 
   ipcMain.handle('background-preference:get', trustedRendererHandler(() => ({
     backgroundMode: backgroundPreference,
@@ -1076,6 +1214,16 @@ app.whenReady().then(async () => {
   ipcMain.handle('get-runtime-window-state', trustedRendererHandler(() => runtimeWindowState()));
   ipcMain.handle('get-runtime-cache-state', trustedRendererHandler(() => runtimeCacheState()));
   ipcMain.handle('quit-app', trustedRendererHandler(() => quitApp()));
+  ipcMain.on('test-hooks-enabled', (event) => {
+    const contents = mainWindow?.webContents;
+    event.returnValue = Boolean(
+      testHooksEnabled
+      && contents
+      && !contents.isDestroyed()
+      && event.sender === contents
+      && event.senderFrame === contents.mainFrame,
+    );
+  });
   ipcMain.on('window-mode-ready', (event, payload) => {
     if (!isTrustedRenderer(event)) {
       console.warn('[window] rejected mode acknowledgement from untrusted renderer');
@@ -1102,18 +1250,34 @@ app.whenReady().then(async () => {
     labelsPath: unpackedResourcePath('models', audioEventModelDirectory, 'class_labels_indices.csv'),
   });
   registerAudioEventIpc();
-  const [speakerState, audioEventState] = await Promise.all([
+  const serviceInitialization = Promise.all([
     speakerService.initialize(),
     audioEventService.initialize(),
   ]);
-  if (!speakerState.ready) console.error('[speaker] initialization failed:', speakerState.error);
-  if (!audioEventState.ready) console.error('[audio-event] initialization failed:', audioEventState.error);
-
   createMainWindow();
   createTray();
+  const [speakerState, audioEventState] = await serviceInitialization;
+  if (!speakerState.ready) console.error('[speaker] initialization failed:', speakerState.error);
+  if (!audioEventState.ready) console.error('[audio-event] initialization failed:', audioEventState.error);
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!quitFlushComplete) {
+    event.preventDefault();
+    if (quitFlushInProgress) return;
+    quitFlushInProgress = true;
+    const flush = Promise.allSettled([
+      backgroundPreferenceWriteChain,
+      studySettingsWriteChain,
+      windowTransitionChain,
+    ]);
+    const timeout = new Promise((resolve) => setTimeout(resolve, 2_500));
+    Promise.race([flush, timeout]).finally(() => {
+      quitFlushComplete = true;
+      app.quit();
+    });
+    return;
+  }
   isQuitting = true;
   stopFloatingHoverTracking();
   destroyBreakPromptWindow();

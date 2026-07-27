@@ -379,10 +379,151 @@ async function runFloatingWindowAdversary() {
 
 function runStaticAdversary() {
   const mainSource = readSource('main.js');
+  const preloadSource = readSource('preload.js');
+  const speakerSource = readSource('speaker-service.js');
+  const audioEventSource = readSource('audio-event-service.js');
+  const profileCryptoSource = readSource('profile-crypto.js');
+  const cacheCleanupSource = readSource('cache-cleanup.js');
+  const studySettingsSource = readSource('study-settings-policy.js');
+  const windowPolicySource = readSource('window-mode-policy.js');
   const appSource = readSource('renderer/app.js');
   const htmlSource = readSource('renderer/index.html');
+  const breakHtmlSource = readSource('renderer/break-prompt.html');
   const cssSource = readSource('renderer/styles.css');
   const rendererSource = `${appSource}\n${htmlSource}`;
+
+  // A user can legitimately double-click the shortcut again while the first
+  // instance is hidden. A second process must restore the existing window,
+  // never start a second microphone/session/tray stack.
+  assert.match(mainSource, /const hasSingleInstanceLock = app\.requestSingleInstanceLock\(\)/);
+  assert.match(mainSource, /if \(!hasSingleInstanceLock\) app\.quit\(\)/);
+  assert.match(mainSource, /app\.on\('second-instance',[\s\S]*?!mainWindow \|\| mainWindow\.isDestroyed\(\)[\s\S]*?showSceneWindow\(\)\.catch/);
+  assert.match(mainSource, /if \(hasSingleInstanceLock\) app\.whenReady\(\)\.then/);
+  assert.match(mainSource, /const testHooksEnabled = !app\.isPackaged[\s\S]*?SUPERVISION_TEST_HOOKS === '1'/);
+  assert.equal(
+    (mainSource.match(/devTools:\s*!app\.isPackaged/g) || []).length,
+    2,
+    'packaged windows must not expose DevTools',
+  );
+  assert.match(
+    mainSource,
+    /if \(app\.isPackaged\)[\s\S]*?removeSwitch\('remote-debugging-port'\)[\s\S]*?removeSwitch\('remote-debugging-pipe'\)/,
+    'a packaged build accepts a launch-time CDP endpoint despite disabling DevTools',
+  );
+  assert.match(mainSource, /ipcMain\.on\('test-hooks-enabled'[\s\S]*?event\.returnValue = Boolean\([\s\S]*?testHooksEnabled/);
+  assert.match(preloadSource, /const testHooksEnabled = ipcRenderer\.sendSync\('test-hooks-enabled'\) === true/);
+  assert.doesNotMatch(preloadSource, /process\.argv\.includes\('--supervision-test-hooks'\)/);
+  assert.doesNotMatch(mainSource, /additionalArguments:[\s\S]*supervision-test-hooks/);
+  assert.match(appSource, /if \(window\.desktopAPI\.testHooksEnabled\) window\.__beishuTest = Object\.freeze/);
+  assert.doesNotMatch(appSource, /new POLICY\.EffectiveStudyClock\(\)/);
+  assert.match(appSource, /const monotonicNow = \(\) => performance\.now\(\)/);
+  assert.match(appSource, /new POLICY\.EffectiveStudyClock\(\{ now: monotonicNow \}\)/);
+  assert.match(mainSource, /powerMonitor\.on\('suspend', \(\) => sendSystemInterruption\('suspend'\)\)/);
+  assert.match(mainSource, /powerMonitor\.on\('resume', \(\) => sendSystemInterruption\('resume'\)\)/);
+  assert.match(mainSource, /powerMonitor\.on\('lock-screen', \(\) => sendSystemInterruption\('lock-screen'\)\)/);
+  assert.match(mainSource, /powerMonitor\.on\('unlock-screen', \(\) => sendSystemInterruption\('unlock-screen'\)\)/);
+  assert.match(preloadSource, /onSystemInterruption:[\s\S]*?subscribe\('system-interruption'/);
+  assert.match(mainSource, /webContents\.on\('render-process-gone'[\s\S]*?recoverMainWindow/);
+  assert.match(mainSource, /createdWindow\.on\('unresponsive'[\s\S]*?rendererUnresponsiveRecoveryMs/);
+  assert.match(mainSource, /createdWindow\.on\('responsive'[\s\S]*?clearTimeout\(rendererUnresponsiveTimer\)/);
+  assert.match(mainSource, /recoverMainWindow\([\s\S]*?speakerService\.cancelEnrollment\(\{ enrollmentId \}\)/);
+  assert.match(
+    mainSource,
+    /function recoverMainWindow[\s\S]*?breakPromptState = null;[\s\S]*?destroyBreakPromptWindow\(\);[\s\S]*?mainWindowMode = 'scene'/,
+    'renderer recovery can leave an orphaned rest prompt controlling a fresh idle renderer',
+  );
+  assert.match(mainSource, /requestingOrigin === 'rwt:\/\/renderer'/);
+  assert.doesNotMatch(mainSource, /Access-Control-Allow-Origin/);
+  for (const documentSource of [htmlSource, breakHtmlSource]) {
+    assert.match(documentSource, /base-uri 'none'/);
+    assert.match(documentSource, /object-src 'none'/);
+    assert.match(documentSource, /frame-src 'none'/);
+    assert.match(documentSource, /form-action 'none'/);
+  }
+
+  // Slow local inference must preserve an ordered physical lane. A reset may
+  // invalidate results, but it must not pretend an old native request stopped.
+  assert.match(appSource, /const STUDY_EVENT_MAX_QUEUED_WINDOWS = 2/);
+  assert.match(appSource, /studyAudioClassificationQueue:\s*\[\]/);
+  assert.match(appSource, /studyAudioClassificationInFlightId:\s*0/);
+  assert.doesNotMatch(
+    appSource.match(/function resetStudyAudioRuntime\(\)[\s\S]*?\n\}/)?.[0] || '',
+    /studyAudioClassificationPending = false/,
+  );
+  assert.match(appSource, /requestId === state\.studyAudioClassificationInFlightId/);
+  assert.match(appSource, /声音分类处理速度不足，检测已安全停止/);
+
+  // Hiding, minimizing, losing the track, or canceling while busy must stop
+  // microphone enrollment instead of leaving a hidden 24-second capture.
+  assert.match(appSource, /enrollmentCaptureCancel:\s*null/);
+  assert.match(appSource, /enrollmentId:\s*null/);
+  assert.match(appSource, /UI\.enrollmentCancelButton\.disabled = !state\.enrollmentOpen/);
+  assert.match(appSource, /track\.addEventListener\('mute', cancelCapture/);
+  assert.match(appSource, /if \(minimized && state\.enrollmentOpen\)/);
+  assert.match(appSource, /window\.addEventListener\('pagehide',[\s\S]*?enrollmentCaptureCancel/);
+  assert.match(speakerSource, /enrollmentId:\s*this\.enrollment\?\.id \|\| null/);
+  assert.match(speakerSource, /requireEnrollment\(payload = \{\}\)/);
+  assert.match(
+    speakerSource,
+    /cancelEnrollment\(payload = \{\}\)[\s\S]*?if \(this\.enrollment\?\.id === enrollmentId\) this\.enrollment = null;[\s\S]*?return this\.runExclusive/,
+  );
+  assert.match(speakerSource, /writeProfile\(profile, \(\) => this\.assertEnrollmentCurrent\(enrollment\)\)/);
+  assert.match(preloadSource, /finishSpeakerEnrollment: \(enrollmentId\)/);
+  assert.match(preloadSource, /cancelSpeakerEnrollment: \(enrollmentId\)/);
+
+  // Capture health, worker timeouts, and unusable encrypted artifacts all fail
+  // closed while still leaving an explicit user-confirmed deletion path.
+  assert.match(appSource, /const MICROPHONE_PCM_TIMEOUT_MS = 5_000/);
+  assert.match(appSource, /function checkMicrophoneHealth\(\)/);
+  assert.match(speakerSource, /this\.fail\(new SpeakerServiceError\('WORKER_TIMEOUT'/);
+  assert.match(speakerSource, /this\.worker\.terminate\(\)\.catch/);
+  assert.match(audioEventSource, /const WORKER_TIMEOUT_MS = 5_000/);
+  assert.match(speakerSource, /profileArtifactExists:\s*this\.profileArtifactExists/);
+  assert.match(speakerSource, /const MAX_PROFILE_FILE_BYTES = 4 \* 1024 \* 1024/);
+  assert.match(speakerSource, /profileStat\.size > MAX_PROFILE_FILE_BYTES/);
+  assert.match(speakerSource, /deleteProfileArtifact\(\)/);
+  assert.match(speakerSource, /if \(this\.profile\)[\s\S]*?'PROFILE_USABLE'/);
+  assert.match(preloadSource, /deleteSpeakerProfileArtifact/);
+  assert.match(profileCryptoSource, /const DPAPI_TIMEOUT_MS = 10_000/);
+  assert.match(profileCryptoSource, /const DPAPI_MAX_OUTPUT_BYTES = 4 \* 1024 \* 1024/);
+  assert.match(profileCryptoSource, /child\.kill\(\)/);
+  assert.doesNotMatch(profileCryptoSource, /async isAvailable\(\)\s*\{\s*return true/);
+  assert.match(cacheCleanupSource, /function isValidCleanupTarget\(candidate, pid\)/);
+  assert.match(cacheCleanupSource, /path\.basename\(resolved\) === `run-\$\{pid\}`/);
+  assert.match(cacheCleanupSource, /path\.basename\(parent\) === 'TransientElectronData'/);
+  assert.match(cacheCleanupSource, /if \(!isValidCleanupTarget\(target, parentPid\)\)/);
+  assert.match(cacheCleanupSource, /stats\.isSymbolicLink\(\)[\s\S]*?fs\.unlinkSync\(target\)/);
+  assert.match(mainSource, /function removeTransientPathNoFollow\(target\)/);
+  assert.match(
+    mainSource,
+    /const transientParentStats = fsSync\.lstatSync\(transientSessionParent\);[\s\S]*?transientParentStats\.isSymbolicLink\(\)[\s\S]*?removeTransientPathNoFollow\(transientSessionParent\)/,
+    'the cache parent itself can redirect browser writes through a filesystem link',
+  );
+  assert.match(
+    mainSource,
+    /if \(staleStats\.isSymbolicLink\(\)\)[\s\S]*?fsSync\.unlinkSync\(stalePath\);[\s\S]*?continue;/,
+    'startup skips stale run-* links instead of removing the link without following it',
+  );
+  assert.match(
+    mainSource,
+    /const transientSessionDataRoot[\s\S]*?removeTransientPathNoFollow\(transientSessionDataRoot\);[\s\S]*?fsSync\.mkdirSync\(transientSessionDataRoot/,
+    'a PID-reused cache directory can be silently reused by a fresh process',
+  );
+  assert.match(studySettingsSource, /const MAX_SETTINGS_FILE_BYTES = 64 \* 1024/);
+  assert.match(studySettingsSource, /fs\.lstatSync\(filePath\)/);
+  assert.match(windowPolicySource, /const MAX_PREFERENCE_FILE_BYTES = 64 \* 1024/);
+  assert.match(windowPolicySource, /fs\.lstatSync\(filePath\)/);
+  assert.match(
+    speakerSource,
+    /const profileStat = await fsp\.lstat\(this\.profilePath\)/,
+    'speaker profile loading follows a link instead of requiring the local archive itself',
+  );
+  assert.match(appSource, /const write = window\.desktopAPI\.setStudySettings\(payload\)/);
+  assert.match(
+    appSource,
+    /Promise\.race\(\[[\s\S]*?studySettingsSaveChain,[\s\S]*?QUIT_SETTINGS_FLUSH_TIMEOUT_MS[\s\S]*?window\.desktopAPI\.quitApp\(\)\.catch/,
+    'a stuck settings write can leave the exit button permanently unresponsive',
+  );
 
   const browserWindowCreations = mainSource.match(/new BrowserWindow\s*\(/g) || [];
   assert.equal(
@@ -421,15 +562,23 @@ function runStaticAdversary() {
   assert.match(appSource, /backgroundAction\.addEventListener\('pointerenter',[^\n]*setBackgroundActionExpanded\(true\)/);
   assert.match(appSource, /backgroundAction\.addEventListener\('pointerleave',[^\n]*setBackgroundActionExpanded\(false\)/);
 
-  // The whole compact surface can be dragged; only real action buttons may
-  // intercept the pointer as no-drag hit targets.
+  // The operation row must be its own top-level no-drag hit surface. Keeping
+  // it as overflow outside a drag parent makes its visible buttons native
+  // non-client regions on Windows, so they render but never receive clicks.
   assert.match(cssSource, /body\[data-window-mode="floating"\]\s*\{[^}]*-webkit-app-region:\s*drag/);
-  assert.match(cssSource, /\.floating-hover-tools\s*\{[^}]*-webkit-app-region:\s*drag/);
+  assert.match(
+    htmlSource,
+    /<section id="floating-statusbar"[\s\S]*?<\/section>\s*<div class="floating-hover-tools"[\s\S]*?<\/div>\s*<section id="study-scene"/,
+  );
+  assert.match(cssSource, /body\[data-window-mode="floating"\] \.floating-hover-tools\s*\{[^}]*position:\s*fixed[^}]*z-index:\s*13[^}]*-webkit-app-region:\s*no-drag/);
   assert.match(cssSource, /\.floating-timer\s*\{[^}]*-webkit-app-region:\s*drag/);
   assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene\s*\{[^}]*-webkit-app-region:\s*drag/);
   assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas\s*\{[^}]*-webkit-app-region:\s*drag/);
   assert.match(cssSource, /\.floating-action\s*\{[^}]*-webkit-app-region:\s*no-drag/);
-  assert.doesNotMatch(cssSource, /\.floating-(?:hover-tools|timer)[^{]*\{[^}]*-webkit-app-region:\s*no-drag/);
+  assert.match(
+    appSource,
+    /runtime\?\.mode === 'floating' && runtime\?\.floatingHovered === true/,
+  );
 
   assert.match(mainSource, /floatingWindowMinimumSize\s*=\s*Object\.freeze\(\{ width: 224, height: 170 \}\)/);
   assert.match(mainSource, /setMinimumSize\(floatingWindowMinimumSize\.width, floatingWindowMinimumSize\.height\)/);
@@ -443,7 +592,7 @@ function runStaticAdversary() {
   assert.doesNotMatch(htmlSource, /id="floating-anomaly-time"/);
   assert.match(htmlSource, /id="floating-hide-button"[^>]*>隐藏<\/button>/);
   assert.match(htmlSource, /id="floating-expand-button"[^>]*>放大<\/button>/);
-  assert.match(appSource, /function rejectedSpeakerStatus\(now = Date\.now\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
+  assert.match(appSource, /function rejectedSpeakerStatus\(now = monotonicNow\(\)\)[\s\S]*?暂未确认本人声音 \$\{seconds\} 秒/);
   assert.match(appSource, /const message = silenceViolated\s*\? `本人未出声 \$\{silentFor\} 秒`\s*: '暂未检测到本人声音'/);
   assert.doesNotMatch(appSource, /floatingAnomaly|renderFloatingAnomaly|setFloatingAnomalyDuration/);
   assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-voice-state[^{]*\{[^}]*opacity:\s*0/);
@@ -477,7 +626,7 @@ function runStaticAdversary() {
   // System/model failures must never consume a life as if the student were
   // silent. They stop the session before any violation can accumulate.
   assert.match(appSource, /if \(result\?\.error\) throw new Error/);
-  assert.match(appSource, /else if \(state\.active\) \{[\s\S]*?await stopSession\(false, true\);[\s\S]*?未计为违规/);
+  assert.match(appSource, /else if \(state\.active\) \{[\s\S]*?await resetSessionAfterFlowFailure\(error\);[\s\S]*?未计为违规/);
   assert.match(appSource, /const SPEAKER_VERIFY_TIMEOUT_MS = 5_000;/);
   assert.match(appSource, /Promise\.race\(\[[\s\S]*?verifySpeaker\([\s\S]*?声纹处理超时/);
   assert.match(

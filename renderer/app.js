@@ -76,6 +76,8 @@ const POLICY = StudyPolicy;
 const MEDIA_CATALOG_URL = 'rwt://renderer/media/catalog.json';
 const LEGACY_SETTINGS_STORAGE_KEY = 'red-watch-study-settings-v1';
 const MICROPHONE_POLL_MS = 100;
+const MICROPHONE_PCM_TIMEOUT_MS = 5_000;
+const MICROPHONE_DIGITAL_SILENCE_TIMEOUT_MS = 10_000;
 const CALIBRATION_SECONDS = 3;
 const SPEAKER_QUICK_WINDOW_SECONDS = 2;
 const SPEAKER_QUICK_CONFIRM_THRESHOLD = 0.74;
@@ -85,8 +87,10 @@ const SPEAKER_VERIFY_INTERVAL_MS = 1_200;
 const SPEAKER_CONFIRM_HOLD_MS = 2_500;
 const SPEAKER_DEADLINE_GRACE_MS = 3_000;
 const SPEAKER_VERIFY_TIMEOUT_MS = 5_000;
+const QUIT_SETTINGS_FLUSH_TIMEOUT_MS = 2_500;
 const STUDY_EVENT_WINDOW_SECONDS = 2;
 const STUDY_EVENT_INTERVAL_MS = 1_000;
+const STUDY_EVENT_MAX_QUEUED_WINDOWS = 2;
 const STUDY_RECOVERY_CONFIRM_SECONDS = 5;
 const STUDY_EVENT_OVERLAP_SECONDS = Math.max(
   0,
@@ -97,6 +101,7 @@ const ENROLLMENT_SAMPLE_COUNT = 8;
 const ENROLLMENT_WINDOW_SECONDS = 2.4;
 const METER_MIN_DB = -100;
 const RECITE_AUTO_VOICE_MARGIN_DB = 8;
+const monotonicNow = () => performance.now();
 
 const state = {
   active: false,
@@ -110,7 +115,8 @@ const state = {
   stopRequested: false,
   finalizingStop: false,
   sessionFailureCleanupPending: false,
-  studyClock: new POLICY.EffectiveStudyClock(),
+  systemInterruptionPending: false,
+  studyClock: new POLICY.EffectiveStudyClock({ now: monotonicNow }),
   milestoneLedger: new POLICY.MilestoneLedger('recite'),
   earnedPraiseMarks: 0,
   praisedMark: 0,
@@ -126,6 +132,10 @@ const state = {
   nextPatrolAt: 0,
   audioStream: null,
   microphoneGeneration: 0,
+  microphoneHealthTimer: null,
+  microphoneHealthFailurePending: false,
+  lastPcmAt: 0,
+  lastNonZeroPcmAt: 0,
   preflightTesting: false,
   preflightStarting: false,
   preflightStopping: false,
@@ -146,6 +156,7 @@ const state = {
   audioEventReady: false,
   audioEventError: '',
   speakerProfileExists: false,
+  speakerProfileArtifactExists: false,
   speakerProfileCreatedAt: '',
   speakerProfiles: [],
   speakerModelError: '',
@@ -166,6 +177,9 @@ const state = {
   studyAudioChunks: [],
   studyAudioSampleCount: 0,
   studyAudioClassificationPending: false,
+  studyAudioClassificationQueue: [],
+  studyAudioClassificationRequestSequence: 0,
+  studyAudioClassificationInFlightId: 0,
   studyAudioClassificationGeneration: 0,
   lastStudyAudioClassificationAt: 0,
   latestStudyAudioDecision: null,
@@ -176,6 +190,9 @@ const state = {
   enrollmentOpen: false,
   enrollmentPending: false,
   enrollmentBusy: false,
+  enrollmentId: null,
+  enrollmentGeneration: 0,
+  enrollmentCaptureCancel: null,
   silenceArmed: false,
   silentSince: 0,
   silencePausedAt: 0,
@@ -256,12 +273,12 @@ let studySettingsSaveChain = Promise.resolve();
 
 function saveSettings() {
   const payload = studySettingsPayload({ mode: state.mode, ...state.settings });
-  const write = studySettingsSaveChain
-    .catch(() => {})
-    .then(() => window.desktopAPI.setStudySettings(payload));
-  studySettingsSaveChain = write.catch((error) => {
+  const previous = studySettingsSaveChain;
+  const write = window.desktopAPI.setStudySettings(payload);
+  write.catch((error) => {
     console.error('[settings] 保存学习设置失败：', error);
   });
+  studySettingsSaveChain = Promise.allSettled([previous, write]).then(() => {});
   return write;
 }
 
@@ -372,7 +389,7 @@ function violationLimitMs() {
   return violationLimitSeconds() * 1_000;
 }
 
-function rejectedSpeakerStatus(now = Date.now()) {
+function rejectedSpeakerStatus(now = monotonicNow()) {
   const seconds = state.silentSince
     ? Math.max(0, Math.floor((now - state.silentSince) / 1_000))
     : 0;
@@ -390,7 +407,7 @@ function resetDetectionAfterSettingChange() {
     resetStudyAudioRuntime();
   } else {
     resetSpeakerRuntime();
-    state.silentSince = state.calibrating ? 0 : Date.now();
+    state.silentSince = state.calibrating ? 0 : monotonicNow();
     state.silenceArmed = !state.calibrating;
   }
   if (state.calibrating) {
@@ -690,17 +707,27 @@ function setMode(mode) {
 }
 
 function updateSpeakerProfileUi() {
+  const speakerActionDisabled = state.active
+    || state.startPending
+    || state.previewPending
+    || state.speakerProfileMutationPending
+    || state.sceneRunning
+    || Boolean(state.presentation)
+    || state.enrollmentPending
+    || state.enrollmentBusy;
   if (state.speakerModelError) {
     setChip(UI.speakerProfileState, '声纹模型不可用', 'alert');
     UI.speakerEnrollButton.disabled = true;
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
+    UI.speakerDeleteButton.disabled = speakerActionDisabled;
     UI.speakerProfileSelect.hidden = true;
     return;
   }
   if (!state.speakerReady) {
     setChip(UI.speakerProfileState, '正在加载声纹模型…');
     UI.speakerEnrollButton.disabled = true;
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
+    UI.speakerDeleteButton.disabled = speakerActionDisabled;
     UI.speakerProfileSelect.hidden = true;
     return;
   }
@@ -720,17 +747,9 @@ function updateSpeakerProfileUi() {
   } else {
     setChip(UI.speakerProfileState, state.speakerProfileError ? '旧声纹需要重新录入' : '尚未录入本人声纹', state.speakerProfileError ? 'alert' : '');
     UI.speakerEnrollButton.textContent = '录入本人声音';
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
     UI.speakerProfileSelect.hidden = true;
   }
-  const speakerActionDisabled = state.active
-    || state.startPending
-    || state.previewPending
-    || state.speakerProfileMutationPending
-    || state.sceneRunning
-    || Boolean(state.presentation)
-    || state.enrollmentPending
-    || state.enrollmentBusy;
   UI.speakerEnrollButton.disabled = speakerActionDisabled;
   UI.speakerDeleteButton.disabled = speakerActionDisabled;
   UI.speakerProfileSelect.disabled = speakerActionDisabled;
@@ -742,6 +761,7 @@ async function refreshSpeakerState() {
     const profile = await window.desktopAPI.getSpeakerState();
     state.speakerReady = Boolean(profile?.ready);
     state.speakerProfileExists = Boolean(profile?.profileExists);
+    state.speakerProfileArtifactExists = Boolean(profile?.profileArtifactExists);
     state.speakerProfileCreatedAt = profile?.createdAt || '';
     state.speakerProfiles = Array.isArray(profile?.profiles) ? profile.profiles : [];
     state.speakerModelError = state.speakerReady ? '' : (profile?.error || '声纹服务启动失败');
@@ -749,6 +769,7 @@ async function refreshSpeakerState() {
   } catch (error) {
     state.speakerReady = false;
     state.speakerProfileExists = false;
+    state.speakerProfileArtifactExists = false;
     state.speakerProfiles = [];
     state.speakerModelError = error.message || '声纹服务启动失败';
     state.speakerProfileError = '';
@@ -779,7 +800,7 @@ async function refreshAudioEventState() {
 function setEnrollmentBusy(busy) {
   state.enrollmentBusy = busy;
   UI.enrollmentMicButton.disabled = busy;
-  UI.enrollmentCancelButton.disabled = busy;
+  UI.enrollmentCancelButton.disabled = !state.enrollmentOpen;
   updateSpeakerProfileUi();
 }
 
@@ -815,7 +836,12 @@ async function openSpeakerEnrollment() {
         return false;
       }
     }
-    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() });
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment({
+      label: selectedMicrophoneProfileLabel(),
+    });
+    state.enrollmentGeneration += 1;
+    state.enrollmentId = enrollment?.enrollmentId || null;
+    if (!state.enrollmentId) throw new Error('声纹录入会话启动失败。');
     state.enrollmentOpen = true;
     state.enrollmentBusy = false;
     UI.enrollmentMicState.textContent = '麦克风：准备就绪';
@@ -834,17 +860,40 @@ async function openSpeakerEnrollment() {
 
 async function closeSpeakerEnrollment({ cancel = false } = {}) {
   if (!state.enrollmentOpen) return;
-  if (cancel) await window.desktopAPI.cancelSpeakerEnrollment().catch(() => {});
+  const enrollmentId = state.enrollmentId;
+  state.enrollmentGeneration += 1;
+  state.enrollmentCaptureCancel?.();
+  state.enrollmentCaptureCancel = null;
   state.enrollmentOpen = false;
   state.enrollmentBusy = false;
+  state.enrollmentId = null;
   UI.speakerEnrollment.hidden = true;
   document.body.classList.remove('enrollment-mode');
   updateSpeakerProfileUi();
   updateModeUi();
+  if (cancel && enrollmentId) {
+    await window.desktopAPI.cancelSpeakerEnrollment(enrollmentId).catch(() => {});
+  }
 }
 
-async function captureEnrollmentMicrophone(durationSeconds) {
+function enrollmentCancelledError() {
+  const error = new Error('声纹录入已取消。');
+  error.code = 'ENROLLMENT_CANCELLED';
+  return error;
+}
+
+function assertEnrollmentGeneration(generation) {
+  if (!state.enrollmentOpen || generation !== state.enrollmentGeneration) {
+    throw enrollmentCancelledError();
+  }
+}
+
+async function captureEnrollmentMicrophone(durationSeconds, generation) {
   const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints({ rawStudyAudio: false }));
+  if (!state.enrollmentOpen || generation !== state.enrollmentGeneration) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw enrollmentCancelledError();
+  }
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   let context;
   try {
@@ -861,22 +910,53 @@ async function captureEnrollmentMicrophone(durationSeconds) {
   let totalLength = 0;
   let capture = null;
   let progressTimer = null;
-  const startedAt = Date.now();
+  let durationTimer = null;
+  let rejectDuration = null;
+  let cancelled = false;
+  const startedAt = monotonicNow();
+  const cancelCapture = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (state.enrollmentOpen && generation === state.enrollmentGeneration) {
+      state.enrollmentGeneration += 1;
+      window.queueMicrotask(() => {
+        closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+      });
+    }
+    window.clearTimeout(durationTimer);
+    rejectDuration?.(enrollmentCancelledError());
+    capture?.stop();
+    stream.getTracks().forEach((track) => track.stop());
+    if (context && context.state !== 'closed') context.close().catch(() => {});
+  };
+  state.enrollmentCaptureCancel = cancelCapture;
+  stream.getAudioTracks().forEach((track) => {
+    track.addEventListener('ended', cancelCapture, { once: true });
+    track.addEventListener('mute', cancelCapture, { once: true });
+  });
   try {
     await context.resume();
+    assertEnrollmentGeneration(generation);
     const source = context.createMediaStreamSource(stream);
     capture = new SpeakerAudio.ContinuousPcmCapture(context, source, (chunk) => {
       chunks.push(chunk);
       totalLength += chunk.length;
     });
     await capture.start();
+    assertEnrollmentGeneration(generation);
     progressTimer = window.setInterval(() => {
-      const remaining = Math.max(0, Math.ceil(durationSeconds - ((Date.now() - startedAt) / 1000)));
+      const remaining = Math.max(0, Math.ceil(durationSeconds - ((monotonicNow() - startedAt) / 1000)));
       UI.enrollmentMicState.textContent = `麦克风：请连续朗读 ${remaining} 秒`;
     }, 200);
-    await new Promise((resolve) => window.setTimeout(resolve, durationSeconds * 1000));
+    await new Promise((resolve, reject) => {
+      rejectDuration = reject;
+      durationTimer = window.setTimeout(resolve, durationSeconds * 1000);
+    });
+    assertEnrollmentGeneration(generation);
   } finally {
     window.clearInterval(progressTimer);
+    window.clearTimeout(durationTimer);
+    if (state.enrollmentCaptureCancel === cancelCapture) state.enrollmentCaptureCancel = null;
     capture?.stop();
     stream.getTracks().forEach((track) => track.stop());
     await context.close().catch(() => {});
@@ -889,10 +969,12 @@ async function captureEnrollmentMicrophone(durationSeconds) {
 
 async function runEnrollmentMicrophone() {
   if (!state.enrollmentOpen || state.enrollmentBusy) return;
+  const generation = state.enrollmentGeneration;
   setEnrollmentBusy(true);
   UI.enrollmentStatus.textContent = '请保持平时背书的音量，连续朗读任意内容。';
   try {
-    const samples = await captureEnrollmentMicrophone(ENROLLMENT_DURATION_SECONDS);
+    const samples = await captureEnrollmentMicrophone(ENROLLMENT_DURATION_SECONDS, generation);
+    assertEnrollmentGeneration(generation);
     const dynamics = SpeakerAudio.analyzeDynamics(samples, SpeakerAudio.TARGET_SAMPLE_RATE);
     if (dynamics.standardDeviationDb < 2 || dynamics.spreadDb < 6) {
       throw new Error('没有检测到足够清晰的连续朗读，请重新录入。');
@@ -903,14 +985,19 @@ async function runEnrollmentMicrophone() {
       minimumDurationSeconds: ENROLLMENT_DURATION_SECONDS - 2,
     });
     for (let index = 0; index < windows.length; index += 1) {
+      assertEnrollmentGeneration(generation);
       UI.enrollmentMicState.textContent = `麦克风：正在提取 ${index + 1}/${windows.length}`;
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId: state.enrollmentId,
         source: 'mic',
         samples: windows[index],
         sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
       });
+      assertEnrollmentGeneration(generation);
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    assertEnrollmentGeneration(generation);
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(state.enrollmentId);
+    assertEnrollmentGeneration(generation);
     state.speakerProfileExists = Boolean(profile?.profileExists);
     state.speakerProfileCreatedAt = profile?.createdAt || '';
     UI.enrollmentMicState.textContent = '麦克风：录入完成';
@@ -919,8 +1006,23 @@ async function runEnrollmentMicrophone() {
     await closeSpeakerEnrollment();
     await refreshSpeakerState();
   } catch (error) {
-    await window.desktopAPI.cancelSpeakerEnrollment().catch(() => {});
-    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() }).catch(() => {});
+    if (error?.code === 'ENROLLMENT_CANCELLED'
+      || generation !== state.enrollmentGeneration
+      || !state.enrollmentOpen) return;
+    const failedEnrollmentId = state.enrollmentId;
+    if (failedEnrollmentId) {
+      await window.desktopAPI.cancelSpeakerEnrollment(failedEnrollmentId).catch(() => {});
+    }
+    const restartedEnrollment = await window.desktopAPI.beginSpeakerEnrollment({
+      label: selectedMicrophoneProfileLabel(),
+    }).catch(() => null);
+    state.enrollmentId = restartedEnrollment?.enrollmentId || null;
+    if (!state.enrollmentId) {
+      UI.voiceStatus.textContent = '声纹服务当前不可用，请稍后重新打开录入。';
+      await closeSpeakerEnrollment();
+      await refreshSpeakerState();
+      return;
+    }
     UI.enrollmentMicState.textContent = '麦克风：录入失败';
     UI.enrollmentStatus.textContent = error.message;
     UI.enrollmentMicButton.textContent = `重新录入 ${ENROLLMENT_DURATION_SECONDS} 秒`;
@@ -940,7 +1042,7 @@ async function deleteSpeakerProfile() {
     || state.enrollmentOpen
     || state.enrollmentPending
     || state.enrollmentBusy
-    || !state.speakerProfileExists
+    || (!state.speakerProfileExists && !state.speakerProfileArtifactExists)
   ) return;
   if (!window.confirm('删除保存在本机的本人声纹？')) return;
   state.speakerProfileMutationPending = true;
@@ -949,9 +1051,13 @@ async function deleteSpeakerProfile() {
   try {
     await stopPreflightTest({ status: '本人声纹已删除，请重新录入后再测试。' });
     if (state.active || state.startPending || state.previewPending || state.presentation || state.enrollmentOpen) return;
-    const profileId = UI.speakerProfileSelect.value;
-    if (!profileId) throw new Error('请先选择要删除的声纹。');
-    await window.desktopAPI.deleteSpeakerProfile(profileId);
+    if (state.speakerProfileExists) {
+      const profileId = UI.speakerProfileSelect.value;
+      if (!profileId) throw new Error('请先选择要删除的声纹。');
+      await window.desktopAPI.deleteSpeakerProfile(profileId);
+    } else {
+      await window.desktopAPI.deleteSpeakerProfileArtifact();
+    }
     await refreshSpeakerState();
     UI.voiceStatus.textContent = '本人声纹已删除';
   } finally {
@@ -1080,7 +1186,7 @@ async function playPlan(plan, token) {
       && prepared.clipId === RULES.CLIPS.R_SALUTE,
     );
     state.trace.push({
-      at: Date.now(),
+      at: monotonicNow(),
       clipId: prepared.clipId,
       phase: phases[index],
       kind: plan.kind,
@@ -1192,7 +1298,7 @@ function scheduleNextPatrol(delayMs = RULES.nextPatrolDelay(random)) {
     || state.pendingViolation
   ) return;
   const delay = Math.max(0, Number(delayMs) || 0);
-  state.nextPatrolAt = Date.now() + delay;
+  state.nextPatrolAt = monotonicNow() + delay;
   state.patrolTimer = window.setTimeout(() => {
     state.patrolTimer = null;
     state.nextPatrolAt = 0;
@@ -1215,7 +1321,7 @@ function armSilenceClock() {
     || state.alertOpen
   ) return;
   state.silenceArmed = true;
-  state.silentSince = state.mode === 'recite' ? Date.now() : 0;
+  state.silentSince = state.mode === 'recite' ? monotonicNow() : 0;
   state.silencePausedAt = 0;
   state.quietDetector?.reset();
   if (state.mode === 'study') resetStudyAudioRuntime();
@@ -1223,14 +1329,14 @@ function armSilenceClock() {
 
 function pauseSilenceClock() {
   if (!state.silenceArmed || state.silencePausedAt) return;
-  state.silencePausedAt = Date.now();
+  state.silencePausedAt = monotonicNow();
   if (state.mode === 'study') resetStudyAudioRuntime();
   showAnimationWatchState();
 }
 
 function resumeSilenceClock() {
   if (!state.silencePausedAt) return;
-  if (state.silentSince) state.silentSince += Math.max(0, Date.now() - state.silencePausedAt);
+  if (state.silentSince) state.silentSince += Math.max(0, monotonicNow() - state.silencePausedAt);
   state.silencePausedAt = 0;
   if (state.mode === 'study') resetStudyAudioRuntime();
   showAnimationWatchState();
@@ -1405,7 +1511,7 @@ async function openMicrophone() {
       ? '麦克风驱动仍启用了声音处理，电脑扬声器中的视频声可能被削弱。'
       : '';
     audioTracks.forEach((track) => {
-      track.addEventListener('ended', () => {
+      const handleTrackUnavailable = () => {
         if (generation !== state.microphoneGeneration) return;
         if ((state.preflightTesting || state.preflightStarting) && !state.preflightStopping) {
           stopPreflightTest({ status: '麦克风已断开，测试已停止。' }).catch(handleAuxiliaryUiError);
@@ -1413,7 +1519,9 @@ async function openMicrophone() {
           const error = new Error('麦克风已断开。');
           handleSessionFlowError(error, { voiceMessage: '麦克风已断开，学习已安全停止。' });
         }
-      }, { once: true });
+      };
+      track.addEventListener('ended', handleTrackUnavailable, { once: true });
+      track.addEventListener('mute', handleTrackUnavailable, { once: true });
     });
     if (generation !== state.microphoneGeneration) {
       audioStream.getTracks().forEach((track) => track.stop());
@@ -1431,6 +1539,19 @@ async function openMicrophone() {
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.15;
     source.connect(analyser);
+    audioContext.addEventListener('statechange', () => {
+      if (
+        generation !== state.microphoneGeneration
+        || audioContext.state === 'running'
+        || (!state.active && !state.startPending && !isPreflightAudioActive())
+      ) return;
+      const error = new Error('麦克风音频处理已停止。');
+      if (isPreflightAudioActive()) {
+        stopPreflightTest({ status: '麦克风音频处理已停止，测试已停止。' }).catch(handleAuxiliaryUiError);
+      } else {
+        handleSessionFlowError(error, { voiceMessage: '麦克风音频处理已停止，学习已安全停止。' });
+      }
+    });
 
     pcmCapture = new SpeakerAudio.ContinuousPcmCapture(
       audioContext,
@@ -1455,8 +1576,13 @@ async function openMicrophone() {
     state.previousSpectrum = null;
     state.audioStream = audioStream;
     state.pcmCapture = pcmCapture;
+    state.microphoneHealthFailurePending = false;
+    state.lastPcmAt = monotonicNow();
+    state.lastNonZeroPcmAt = state.lastPcmAt;
     window.clearInterval(state.audioTimer);
     state.audioTimer = window.setInterval(pollMicrophone, MICROPHONE_POLL_MS);
+    window.clearInterval(state.microphoneHealthTimer);
+    state.microphoneHealthTimer = window.setInterval(checkMicrophoneHealth, 1_000);
     refreshMicrophones().catch(() => {});
     return true;
   } catch (error) {
@@ -1471,6 +1597,8 @@ async function releaseMicrophone() {
   state.microphoneGeneration += 1;
   window.clearInterval(state.audioTimer);
   state.audioTimer = null;
+  window.clearInterval(state.microphoneHealthTimer);
+  state.microphoneHealthTimer = null;
   try {
     state.pcmCapture?.stop();
   } catch (error) {
@@ -1503,6 +1631,9 @@ async function releaseMicrophone() {
   resetSpeakerRuntime();
   resetStudyAudioRuntime();
   state.microphoneProcessingWarning = '';
+  state.microphoneHealthFailurePending = false;
+  state.lastPcmAt = 0;
+  state.lastNonZeroPcmAt = 0;
 }
 
 function resetIdleDetectionUi() {
@@ -1613,7 +1744,7 @@ function clearRestTimer() {
 
 function remainingRestSeconds() {
   if (!state.restDeadline) return 0;
-  return Math.max(0, Math.ceil((state.restDeadline - Date.now()) / 1_000));
+  return Math.max(0, Math.ceil((state.restDeadline - monotonicNow()) / 1_000));
 }
 
 async function updateRestPrompt() {
@@ -1680,7 +1811,7 @@ async function startBreak(durationOverrideMs = null) {
   state.silencePausedAt = 0;
   state.quietDetector?.reset();
   clearPatrolTimer();
-  state.restDeadline = Date.now() + durationMs;
+  state.restDeadline = monotonicNow() + durationMs;
   updateBreakButton();
   addLog('开始两分钟休息。');
 
@@ -1921,6 +2052,7 @@ async function stopSession(addEvent = true, immediateSceneReset = false) {
     state.finalizingStop = false;
     state.alertOpen = false;
     hideOverlay();
+    await window.desktopAPI.forceRestoreSceneMode().catch(handleAuxiliaryUiError);
     await showIdleScene().catch(() => {});
     setStoppedControls('待命');
     return;
@@ -2004,7 +2136,7 @@ async function previewSelectedClip() {
     presentation.alertId = Number(revealResult?.alertId) || 0;
     const prepared = await prepareClip(clip.id, true);
     if (state.presentation !== presentation || token !== state.sceneToken) return;
-    state.trace.push({ at: Date.now(), clipId: clip.id, phase: 'preview', kind: 'preview', fatal: false, strike: 0 });
+    state.trace.push({ at: monotonicNow(), clipId: clip.id, phase: 'preview', kind: 'preview', fatal: false, strike: 0 });
     await playPreparedToEnd(prepared, { phase: 'preview' });
   } catch (error) {
     if (state.presentation) handleSceneError(error);
@@ -2131,9 +2263,39 @@ function resetStudyAudioRuntime() {
   state.studyAudioClassificationGeneration += 1;
   state.studyAudioChunks = [];
   state.studyAudioSampleCount = 0;
-  state.studyAudioClassificationPending = false;
+  state.studyAudioClassificationQueue = [];
   state.lastStudyAudioClassificationAt = 0;
   state.latestStudyAudioDecision = null;
+}
+
+function failStudyAudioRuntime(error) {
+  state.studyAudioClassificationGeneration += 1;
+  state.studyAudioClassificationQueue = [];
+  state.audioEventReady = false;
+  state.audioEventError = error.message || '声音分类无法跟上实时音频';
+  if (isPreflightAudioActive()) {
+    stopPreflightTest({ status: `测试已停止：${state.audioEventError}` }).catch(handleAuxiliaryUiError);
+  } else if (state.active) {
+    handleSessionFlowError(error, {
+      voiceMessage: '声音分类无法跟上实时音频，学习已安全停止。',
+    });
+  }
+}
+
+function pumpStudyAudioClassificationQueue() {
+  if (state.studyAudioClassificationPending || !isStudyDetectionActive()) return;
+  const job = state.studyAudioClassificationQueue.shift();
+  if (!job) return;
+  const requestId = ++state.studyAudioClassificationRequestSequence;
+  state.studyAudioClassificationPending = true;
+  state.studyAudioClassificationInFlightId = requestId;
+  classifyStudyAudioWindow(
+    job.samples,
+    job.sampleRate,
+    STUDY_EVENT_INTERVAL_MS,
+    job.generation,
+    requestId,
+  );
 }
 
 function renderStudyAudioDecision(quietResult, decision) {
@@ -2191,8 +2353,7 @@ function renderStudyAudioDecision(quietResult, decision) {
   if (animationWatchPresentationActive()) showAnimationWatchState();
 }
 
-async function classifyStudyAudioWindow(samples, sampleRate, decisionDurationMs, generation) {
-  state.studyAudioClassificationPending = true;
+async function classifyStudyAudioWindow(samples, sampleRate, decisionDurationMs, generation, requestId) {
   try {
     const normalized = sampleRate === SpeakerAudio.TARGET_SAMPLE_RATE
       ? samples
@@ -2213,16 +2374,12 @@ async function classifyStudyAudioWindow(samples, sampleRate, decisionDurationMs,
     renderStudyAudioDecision(quietResult, decision);
   } catch (error) {
     if (generation !== state.studyAudioClassificationGeneration) return;
-    state.audioEventReady = false;
-    state.audioEventError = error.message || '声音分类失败';
-    if (isPreflightAudioActive()) {
-      stopPreflightTest({ status: `测试已停止：${state.audioEventError}` }).catch(handleAuxiliaryUiError);
-    } else if (state.active) {
-      handleSessionFlowError(error, { voiceMessage: '声音分类不可用，学习已安全停止。' });
-    }
+    failStudyAudioRuntime(error);
   } finally {
-    if (generation === state.studyAudioClassificationGeneration) {
+    if (requestId === state.studyAudioClassificationInFlightId) {
       state.studyAudioClassificationPending = false;
+      state.studyAudioClassificationInFlightId = 0;
+      pumpStudyAudioClassificationQueue();
     }
   }
 }
@@ -2241,10 +2398,9 @@ function onStudyPcmChunk(chunk) {
     state.studyAudioSampleCount = compacted.length;
   }
 
-  const now = Date.now();
+  const now = monotonicNow();
   if (
     state.studyAudioSampleCount < targetLength
-    || state.studyAudioClassificationPending
     || (state.lastStudyAudioClassificationAt && now - state.lastStudyAudioClassificationAt < STUDY_EVENT_INTERVAL_MS)
   ) return;
 
@@ -2252,16 +2408,18 @@ function onStudyPcmChunk(chunk) {
   const windowSamples = allSamples.slice(Math.max(0, allSamples.length - targetLength));
   state.studyAudioChunks = [windowSamples];
   state.studyAudioSampleCount = windowSamples.length;
-  const decisionDurationMs = state.lastStudyAudioClassificationAt
-    ? clamp(now - state.lastStudyAudioClassificationAt, 500, 1_500)
-    : STUDY_EVENT_INTERVAL_MS;
   state.lastStudyAudioClassificationAt = now;
-  classifyStudyAudioWindow(
-    windowSamples,
+  if (state.studyAudioClassificationPending
+    && state.studyAudioClassificationQueue.length >= STUDY_EVENT_MAX_QUEUED_WINDOWS) {
+    failStudyAudioRuntime(new Error('声音分类处理速度不足，检测已安全停止。'));
+    return;
+  }
+  state.studyAudioClassificationQueue.push({
+    samples: windowSamples,
     sampleRate,
-    decisionDurationMs,
-    state.studyAudioClassificationGeneration,
-  );
+    generation: state.studyAudioClassificationGeneration,
+  });
+  pumpStudyAudioClassificationQueue();
 }
 
 async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false } = {}) {
@@ -2271,7 +2429,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
   ) return;
   const generation = state.speakerVerificationGeneration;
   state.speakerVerificationPending = true;
-  state.lastSpeakerVerificationAt = Date.now();
+  state.lastSpeakerVerificationAt = monotonicNow();
   let verificationTimeout = null;
   try {
     const normalized = sourceSampleRate === SpeakerAudio.TARGET_SAMPLE_RATE
@@ -2296,7 +2454,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
       typeof result.error === 'string' ? result.error : '声纹服务暂时不可用。',
     );
     state.preflightSpeakerError = '';
-    const now = Date.now();
+    const now = monotonicNow();
     const matched = Boolean(result?.matched);
     const strongMatch = Boolean(result?.strongMatch);
     const score = Number(result?.score) || 0;
@@ -2358,7 +2516,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
     if (generation !== state.speakerVerificationGeneration) return;
     state.ownerCandidateAt = 0;
     state.speakerMatchHistory = [];
-    state.lastSpeakerDecisionAt = Date.now();
+    state.lastSpeakerDecisionAt = monotonicNow();
     state.lastSpeakerMatched = false;
     state.lastSpeakerNearMatch = false;
     state.lastSpeakerRejected = false;
@@ -2369,7 +2527,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false 
       state.preflightSpeakerError = error.message;
       await stopPreflightTest({ status: `声纹服务异常，测试已安全停止：${error.message}` });
     } else if (state.active) {
-      await stopSession(false, true);
+      await resetSessionAfterFlowFailure(error);
       setChip(UI.voiceState, '声纹服务异常', 'alert');
       UI.voiceStatus.textContent = `检测已安全停止：${error.message}`;
       UI.sessionState.textContent = '检测已安全停止';
@@ -2403,7 +2561,7 @@ function pumpSpeakerVerification(sourceSampleRate) {
   }
   if (
     state.speakerSampleCount < targetLength
-    || Date.now() - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
+    || monotonicNow() - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
   ) return;
 
   const allSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount);
@@ -2415,7 +2573,39 @@ function pumpSpeakerVerification(sourceSampleRate) {
   verifyOwnerVoice(windowSamples, sampleRate);
 }
 
+function checkMicrophoneHealth() {
+  if (
+    state.microphoneHealthFailurePending
+    || !state.audioStream
+    || !state.audioContext
+    || (!state.active && !state.startPending && !isPreflightAudioActive())
+  ) return;
+  const now = monotonicNow();
+  const pcmStalled = !state.lastPcmAt || now - state.lastPcmAt >= MICROPHONE_PCM_TIMEOUT_MS;
+  const digitallySilent = state.mode === 'study'
+    && state.lastNonZeroPcmAt
+    && now - state.lastNonZeroPcmAt >= MICROPHONE_DIGITAL_SILENCE_TIMEOUT_MS;
+  if (!pcmStalled && !digitallySilent && state.audioContext.state === 'running') return;
+
+  state.microphoneHealthFailurePending = true;
+  const message = digitallySilent
+    ? '麦克风持续没有有效采样，检测已安全停止。'
+    : '麦克风没有继续提供声音，检测已安全停止。';
+  if (isPreflightAudioActive()) {
+    stopPreflightTest({ status: message }).catch(handleAuxiliaryUiError);
+  } else {
+    resetSessionAfterFlowFailure(new Error(message)).then(() => {
+      setChip(UI.voiceState, '麦克风检测已停止', 'alert');
+      UI.voiceStatus.textContent = message;
+      UI.sessionState.textContent = '检测已安全停止';
+    }).catch(handleSessionFlowError);
+  }
+}
+
 function onRuntimePcmChunk(chunk) {
+  const now = monotonicNow();
+  state.lastPcmAt = now;
+  if (chunk.some((sample) => Math.abs(sample) > 1e-7)) state.lastNonZeroPcmAt = now;
   if (state.mode === 'study') {
     onStudyPcmChunk(chunk);
     return;
@@ -2425,7 +2615,6 @@ function onRuntimePcmChunk(chunk) {
     || !state.latestVadSpeech
   ) return;
 
-  const now = Date.now();
   if (state.lastSpeechChunkAt && now - state.lastSpeechChunkAt > 650) {
     state.speakerChunks = [];
     state.speakerSampleCount = 0;
@@ -2510,7 +2699,7 @@ function pollMicrophone() {
     document.body.dataset.vadState = 'ready';
     if (preflight) {
       state.silenceArmed = true;
-      state.silentSince = state.mode === 'recite' ? Date.now() : 0;
+      state.silentSince = state.mode === 'recite' ? monotonicNow() : 0;
       state.quietDetector?.reset();
       updatePreflightUi(state.mode === 'study'
         ? '校准完成，请按平时的方式安静学习。'
@@ -2539,7 +2728,7 @@ function pollMicrophone() {
     updatePreflightUi(`声纹验证失败：${state.preflightSpeakerError}`);
     return;
   }
-  const now = Date.now();
+  const now = monotonicNow();
   const ownerConfirmed = result.isSpeech && now < state.ownerConfirmedUntil;
   if (ownerConfirmed) {
     document.body.dataset.voiceDetected = 'true';
@@ -2571,8 +2760,8 @@ function pollMicrophone() {
   }
 
   if (!state.silenceArmed) return;
-  if (!state.silentSince) state.silentSince = Date.now();
-  const silentForMs = Date.now() - state.silentSince;
+  if (!state.silentSince) state.silentSince = monotonicNow();
+  const silentForMs = monotonicNow() - state.silentSince;
   const silentFor = Math.floor(silentForMs / 1000);
   const silenceViolated = silentForMs >= violationLimitMs();
   if (!result.isSpeech) {
@@ -2593,7 +2782,7 @@ function pollMicrophone() {
     const graceDeadline = state.silentSince + violationLimitMs() + SPEAKER_DEADLINE_GRACE_MS;
     const verificationInFlight = result.isSpeech
       || state.speakerSampleCount > 0;
-    if (verificationInFlight && Date.now() < graceDeadline) {
+    if (verificationInFlight && monotonicNow() < graceDeadline) {
       if (preflight) {
         state.preflightThresholdReached = false;
         updatePreflightUi('达到设定时间，正在等待本次声纹确认。');
@@ -2701,7 +2890,7 @@ async function startSession() {
     state.alertOpen = false;
     state.alerts = 0;
     state.lives = RULES.MAX_LIVES;
-    state.studyClock = new POLICY.EffectiveStudyClock();
+    state.studyClock = new POLICY.EffectiveStudyClock({ now: monotonicNow });
     state.milestoneLedger = new POLICY.MilestoneLedger(state.mode);
     state.earnedPraiseMarks = 0;
     state.praisedMark = 0;
@@ -2736,6 +2925,9 @@ function applyWindowMode(mode) {
   state.windowMode = mode;
   document.body.dataset.windowMode = mode;
   if (mode !== 'floating') document.body.classList.remove('floating-hovered');
+  if ((mode === 'hidden' || mode === 'floating') && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+  }
   if ((mode === 'hidden' || mode === 'floating') && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已转入后台，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
@@ -2755,6 +2947,9 @@ async function toggleWindowMaximize() {
 
 async function hideWindowFromChrome(forceMode = null) {
   await stopPreflightTest({ status: '窗口已转入后台，测试已停止。' });
+  const enrollmentCancellation = state.enrollmentOpen
+    ? closeSpeakerEnrollment({ cancel: true })
+    : Promise.resolve();
   const requestedMode = state.sessionPhase === 'resting' ? 'hidden' : (forceMode || (
     state.active
       ? state.settings.backgroundMode
@@ -2762,6 +2957,7 @@ async function hideWindowFromChrome(forceMode = null) {
   ));
   addLog(requestedMode === 'floating' ? '显示漂浮窗。' : '完全隐藏到后台。');
   await window.desktopAPI.hideToBackground(requestedMode);
+  await enrollmentCancellation.catch(handleAuxiliaryUiError);
 }
 
 async function chooseBackgroundModeAndHide(mode) {
@@ -2782,6 +2978,23 @@ function handleSceneError(error) {
 
 function handleAuxiliaryUiError(error) {
   console.error('辅助窗口操作失败：', error);
+}
+
+async function handleSystemInterruption() {
+  if (state.systemInterruptionPending) return;
+  state.systemInterruptionPending = true;
+  try {
+    if (state.enrollmentOpen) await closeSpeakerEnrollment({ cancel: true });
+    await stopPreflightTest({ status: '系统状态变化，测试已停止。' });
+    if (state.active || state.startPending || state.sceneRunning || state.sessionPhase === 'resting') {
+      await stopSession(false, true);
+      setChip(UI.voiceState, '学习已停止');
+      UI.voiceStatus.textContent = '电脑休眠或锁定后，请重新开始学习。';
+      UI.sessionState.textContent = '学习已停止';
+    }
+  } finally {
+    state.systemInterruptionPending = false;
+  }
 }
 
 async function resetSessionAfterFlowFailure(flowError) {
@@ -2860,14 +3073,14 @@ function handleSessionFlowError(error, { voiceMessage = '' } = {}) {
   });
 }
 
-UI.startButton.addEventListener('click', startSession);
-UI.stopButton.addEventListener('click', () => stopSession());
+UI.startButton.addEventListener('click', () => startSession().catch(handleSessionFlowError));
+UI.stopButton.addEventListener('click', () => stopSession().catch(handleSessionFlowError));
 UI.breakButton.addEventListener('click', () => startBreak().catch(handleSessionFlowError));
 UI.reciteModeButton.addEventListener('click', () => setMode('recite'));
 UI.studyModeButton.addEventListener('click', () => setMode('study'));
-UI.backgroundButton.addEventListener('click', async () => {
+UI.backgroundButton.addEventListener('click', () => {
   setBackgroundActionExpanded(false);
-  await hideWindowFromChrome();
+  hideWindowFromChrome().catch(handleAuxiliaryUiError);
 });
 UI.backgroundAction.addEventListener('pointerenter', () => setBackgroundActionExpanded(true));
 UI.backgroundAction.addEventListener('pointerleave', () => setBackgroundActionExpanded(false));
@@ -2921,8 +3134,12 @@ UI.controlsButton.addEventListener('click', () => {
 UI.exitButton.addEventListener('click', async () => {
   try {
     await stopPreflightTest({ status: '正在退出，测试已停止。' });
+    await Promise.race([
+      studySettingsSaveChain,
+      new Promise((resolve) => window.setTimeout(resolve, QUIT_SETTINGS_FLUSH_TIMEOUT_MS)),
+    ]);
   } finally {
-    window.desktopAPI.quitApp();
+    window.desktopAPI.quitApp().catch(handleAuxiliaryUiError);
   }
 });
 UI.preflightTestButton.addEventListener('click', () => {
@@ -2959,17 +3176,35 @@ UI.studyVoiceLimit.addEventListener('input', () => {
   if (state.settings.studyVoiceSeconds !== previousSeconds) resetDetectionAfterSettingChange();
   saveSettings();
 });
-UI.speakerEnrollButton.addEventListener('click', () => openSpeakerEnrollment());
-UI.speakerDeleteButton.addEventListener('click', () => deleteSpeakerProfile());
-UI.enrollmentMicButton.addEventListener('click', () => runEnrollmentMicrophone());
-UI.enrollmentCancelButton.addEventListener('click', () => closeSpeakerEnrollment({ cancel: true }));
-UI.previewClipButton.addEventListener('click', previewSelectedClip);
-UI.inlineAlertDismiss.addEventListener('click', () => finishPreview());
-UI.inlineAlertStop.addEventListener('click', () => stopSession());
+UI.speakerEnrollButton.addEventListener('click', () => {
+  openSpeakerEnrollment().catch((error) => {
+    UI.voiceStatus.textContent = `无法打开声纹录入：${error.message}`;
+  });
+});
+UI.speakerDeleteButton.addEventListener('click', () => {
+  deleteSpeakerProfile().catch(handleAuxiliaryUiError);
+});
+UI.enrollmentMicButton.addEventListener('click', () => {
+  runEnrollmentMicrophone().catch(handleAuxiliaryUiError);
+});
+UI.enrollmentCancelButton.addEventListener('click', () => {
+  closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+});
+UI.previewClipButton.addEventListener('click', () => {
+  previewSelectedClip().catch(handleAuxiliaryUiError);
+});
+UI.inlineAlertDismiss.addEventListener('click', () => {
+  finishPreview().catch(handleAuxiliaryUiError);
+});
+UI.inlineAlertStop.addEventListener('click', () => {
+  stopSession().catch(handleSessionFlowError);
+});
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.presentation) finishPreview();
-  else if (event.key === 'Escape' && state.enrollmentOpen && !state.enrollmentBusy) {
-    closeSpeakerEnrollment({ cancel: true });
+  if (event.key === 'Escape' && state.presentation) {
+    finishPreview().catch(handleAuxiliaryUiError);
+  }
+  else if (event.key === 'Escape' && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
   }
 });
 window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId = 0 }) => {
@@ -2979,7 +3214,7 @@ window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId =
     const acknowledge = () => {
       if (acknowledged) return;
       acknowledged = true;
-      window.desktopAPI.acknowledgeWindowMode({ transitionId, mode });
+      window.desktopAPI.acknowledgeWindowMode({ transitionId, mode }).catch(handleAuxiliaryUiError);
     };
     const fallback = window.setTimeout(() => {
       void document.body.offsetWidth;
@@ -2995,6 +3230,9 @@ window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId =
   if (minimized && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已最小化，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
+  if (minimized && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+  }
 });
 window.desktopAPI.onFloatingHoverChanged((payload) => {
   document.body.classList.toggle(
@@ -3005,6 +3243,9 @@ window.desktopAPI.onFloatingHoverChanged((payload) => {
 window.desktopAPI.onWindowMaximizedChanged(({ maximized }) => setWindowMaximizedControl(maximized));
 window.desktopAPI.onWindowCloseRequested(() => {
   hideWindowFromChrome().catch(handleAuxiliaryUiError);
+});
+window.desktopAPI.onSystemInterruption(() => {
+  handleSystemInterruption().catch(handleSessionFlowError);
 });
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
@@ -3020,12 +3261,20 @@ window.desktop.onBreakPromptAction((action) => {
   else if (action === 'bank') bankBreakPrompt().catch(handleAuxiliaryUiError);
 });
 window.addEventListener('pagehide', () => {
+  if (state.enrollmentOpen) {
+    const enrollmentId = state.enrollmentId;
+    state.enrollmentGeneration += 1;
+    state.enrollmentCaptureCancel?.();
+    state.enrollmentCaptureCancel = null;
+    state.enrollmentId = null;
+    if (enrollmentId) window.desktopAPI.cancelSpeakerEnrollment(enrollmentId).catch(() => {});
+  }
   if (state.preflightTesting || state.preflightStarting || state.preflightStopping) {
     stopPreflightTest({ status: '测试已停止。' }).catch(() => {});
   }
 });
 
-window.__beishuTest = Object.freeze({
+if (window.desktopAPI.testHooksEnabled) window.__beishuTest = Object.freeze({
   rules: RULES,
   setRandomValues(values) {
     state.randomValues = Array.isArray(values) ? [...values] : [];
@@ -3112,7 +3361,7 @@ window.__beishuTest = Object.freeze({
   },
   setEffectiveElapsedMs(value) {
     const elapsedMs = Math.max(0, Number(value) || 0);
-    state.studyClock = new POLICY.EffectiveStudyClock({ elapsedMs });
+    state.studyClock = new POLICY.EffectiveStudyClock({ elapsedMs, now: monotonicNow });
     if (state.sessionPhase === 'studying') state.studyClock.resume();
     settleStudyMilestones();
     const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
@@ -3125,7 +3374,7 @@ window.__beishuTest = Object.freeze({
   },
   completeBreak() {
     if (state.sessionPhase !== 'resting') return false;
-    state.restDeadline = Date.now();
+    state.restDeadline = monotonicNow();
     tickBreak(state.restGeneration);
     return true;
   },
@@ -3151,6 +3400,10 @@ async function initialize() {
   const runtime = await window.desktopAPI.getRuntimeWindowState().catch(() => null);
   setWindowMaximizedControl(runtime?.maximized);
   if (runtime?.mode) applyWindowMode(runtime.mode);
+  document.body.classList.toggle(
+    'floating-hovered',
+    runtime?.mode === 'floating' && runtime?.floatingHovered === true,
+  );
   updateModeUi();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
     setChip(UI.voiceState, '需要录入本人声纹');

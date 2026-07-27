@@ -453,17 +453,19 @@ try {
       const mono = SpeakerAudio.mixToMono(buffer);
       return buffer.sampleRate === 16000 ? mono : SpeakerAudio.resampleLinear(mono, buffer.sampleRate, 16000);
     };
-    await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollmentId = enrollment.enrollmentId;
     const names = [...Object.keys(encoded), ...Object.keys(encoded), ...Object.keys(encoded)].slice(0, 8);
     for (let index = 0; index < names.length; index += 1) {
       const samples = await decode(encoded[names[index]]);
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId,
         source: 'mic',
         samples,
         sampleRate: 16000,
       });
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(enrollmentId);
     await refreshSpeakerState();
     await context.close();
     return { profile, rendererProfile: state.speakerProfileExists };
@@ -596,13 +598,12 @@ try {
       steadyNoise: true, speechScore: 0, voiceRatio: .5, flatness: .4, flux: .005
     });
     const realNow = Date.now;
-    let now = 100000;
-    Date.now = () => now;
+    Date.now = () => Number.MAX_SAFE_INTEGER;
     state.silenceArmed = true;
-    state.silentSince = 80001;
+    state.silentSince = monotonicNow() - violationLimitMs() + 100;
     pollMicrophone();
     const early = state.alertOpen;
-    now = 100001;
+    state.silentSince = monotonicNow() - violationLimitMs() - 100;
     pollMicrophone();
     const exact = state.alertOpen;
     window.__beishuTest.triggerSilenceViolation();

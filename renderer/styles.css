@@ -102,7 +102,8 @@ button, input, select { font: inherit; }
 .window-glyph.close::before { transform: rotate(45deg); }
 .window-glyph.close::after { transform: rotate(-45deg); }
 
-.floating-statusbar { display: none; }
+.floating-statusbar,
+.floating-hover-tools { display: none; }
 
 .study-scene {
   position: fixed;
@@ -409,12 +410,13 @@ body[data-window-mode="floating"] .floating-statusbar {
 .floating-voice-state.good { color: var(--good); }
 .floating-voice-state.watch { color: #f0bd5d; }
 .floating-voice-state.alert { color: #ffb2a8; }
-.floating-hover-tools {
-  position: absolute;
+body[data-window-mode="floating"] .floating-hover-tools {
+  position: fixed;
   top: 44px;
   right: 0;
   bottom: auto;
   left: 0;
+  z-index: 13;
   display: grid;
   grid-template-columns: minmax(96px, 1fr) auto auto;
   height: 34px;
@@ -425,7 +427,7 @@ body[data-window-mode="floating"] .floating-statusbar {
   pointer-events: none;
   background: linear-gradient(90deg, transparent, rgba(22, 12, 11, .98) 18%);
   transition: opacity .15s ease;
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
 }
 body[data-window-mode="floating"].floating-hovered .floating-hover-tools,
 body[data-window-mode="floating"]:focus-within .floating-hover-tools { opacity: 1; pointer-events: auto; }

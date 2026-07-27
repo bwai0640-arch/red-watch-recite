@@ -27,6 +27,10 @@ assert.doesNotMatch(renderer, /reciteSensitivityDb/);
 
 assert.ok(packageJson.build.files.includes('study-settings-policy.js'));
 assert.match(gitignore, /\*\*\/study-preferences\.json/);
+assert.match(gitignore, /\*\*\/window-preferences\.json/);
+assert.match(gitignore, /\*\*\/speaker-profile\.dat\*/);
+assert.match(gitignore, /\*\.wav/);
+assert.match(gitignore, /\*\.exe/);
 
 console.log(JSON.stringify({
   ipcWhitelisted: true,
@@ -34,4 +38,5 @@ console.log(JSON.stringify({
   legacyMigratedOnce: true,
   missingMicrophoneNeverRebound: true,
   packagedPolicyPresent: true,
+  localPrivacyArtifactsIgnored: true,
 }, null, 2));

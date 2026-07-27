@@ -13,11 +13,29 @@ const dataRoot = path.join(root, 'work', `speaker-service-test-data-${process.pi
 const fixtures = path.join(root, 'work', 'speaker-fixtures');
 const modelPath = path.join(root, 'models', '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx');
 const workerPath = path.join(root, 'speaker-worker.js');
+let profileWriteGate = null;
 const profileCrypto = {
   isAvailable: async () => true,
-  encryptString: async (value) => Buffer.from(value, 'utf8'),
+  encryptString: async (value) => {
+    const gate = profileWriteGate;
+    if (gate) {
+      profileWriteGate = null;
+      gate.enter();
+      await gate.wait;
+    }
+    return Buffer.from(value, 'utf8');
+  },
   decryptString: async (value) => Buffer.from(value).toString('utf8'),
 };
+
+function blockNextProfileWrite() {
+  let release;
+  let enter;
+  const entered = new Promise((resolve) => { enter = resolve; });
+  const wait = new Promise((resolve) => { release = resolve; });
+  profileWriteGate = { enter, wait };
+  return { entered, release };
+}
 
 function wave(name) {
   const result = sherpa.readWave(path.join(fixtures, name), false);
@@ -47,7 +65,11 @@ function syntheticFan() {
 
 async function add(service, source, name) {
   const audio = wave(name);
-  return service.addEnrollmentSample({ source, ...audio });
+  return service.addEnrollmentSample({
+    enrollmentId: service.getState().enrollmentId,
+    source,
+    ...audio,
+  });
 }
 
 async function enrollOwner(service) {
@@ -79,11 +101,15 @@ async function run() {
     /来源无效/,
   );
   await assert.rejects(
-    () => service.addEnrollmentSample({ source: 'mic', ...syntheticFan() }),
+    () => service.addEnrollmentSample({
+      enrollmentId: service.getState().enrollmentId,
+      source: 'mic',
+      ...syntheticFan(),
+    }),
     /连续朗读/,
   );
   await enrollOwner(service);
-  state = await service.finishEnrollment();
+  state = await service.finishEnrollment({ enrollmentId: service.getState().enrollmentId });
   assert.equal(state.profileExists, true);
   assert.equal(state.profileCount, 1);
 
@@ -112,7 +138,7 @@ async function run() {
   // A second local template is retained instead of replacing the first one.
   await service.beginEnrollment();
   await enrollOwner(service);
-  state = await service.finishEnrollment();
+  state = await service.finishEnrollment({ enrollmentId: service.getState().enrollmentId });
   assert.equal(state.profileCount, 2);
   await service.dispose();
 
@@ -130,7 +156,7 @@ async function run() {
     'fangjun-sr-1.wav', 'fangjun-sr-2.wav', 'fangjun-sr-3.wav',
     'leijun-sr-1.wav', 'leijun-sr-2.wav',
   ]) await add(reloaded, 'mic', name);
-  await reloaded.finishEnrollment();
+  await reloaded.finishEnrollment({ enrollmentId: reloaded.getState().enrollmentId });
   state = reloaded.getState();
   assert.equal(state.profileCount, 3);
   assert.equal((await reloaded.verify(wave('fangjun-test-sr-1.wav'))).matched, true);
@@ -138,6 +164,12 @@ async function run() {
 
   const profilePath = path.join(dataRoot, 'speaker-profile.dat');
   const beforeInvalidDelete = await fsp.readFile(profilePath);
+  await assert.rejects(
+    () => reloaded.deleteProfileArtifact(),
+    (error) => error?.code === 'PROFILE_USABLE',
+  );
+  assert.deepEqual(await fsp.readFile(profilePath), beforeInvalidDelete);
+  assert.equal(reloaded.getState().profileCount, 3);
   for (const invalidProfileId of [undefined, null, '', '   ', '../speaker-profile.dat', 'not-a-uuid']) {
     await assert.rejects(
       () => reloaded.deleteProfile(invalidProfileId),
@@ -151,6 +183,22 @@ async function run() {
     /未找到要删除的声纹/,
   );
   assert.deepEqual(await fsp.readFile(profilePath), beforeInvalidDelete);
+
+  // Canceling while finishEnrollment is inside an asynchronous encrypted write
+  // must invalidate the server-side enrollment before anything is committed.
+  await reloaded.beginEnrollment();
+  await enrollOwner(reloaded);
+  const canceledEnrollmentId = reloaded.getState().enrollmentId;
+  const beforeCanceledFinish = await fsp.readFile(profilePath);
+  const writeGate = blockNextProfileWrite();
+  const finishing = reloaded.finishEnrollment({ enrollmentId: canceledEnrollmentId });
+  await writeGate.entered;
+  const canceling = reloaded.cancelEnrollment({ enrollmentId: canceledEnrollmentId });
+  writeGate.release();
+  await assert.rejects(finishing, (error) => error?.code === 'ENROLLMENT_CANCELLED');
+  await canceling;
+  assert.equal(reloaded.getState().profileCount, 3);
+  assert.deepEqual(await fsp.readFile(profilePath), beforeCanceledFinish);
 
   await reloaded.deleteProfile(state.profiles[0].id);
   state = reloaded.getState();
@@ -184,12 +232,35 @@ async function run() {
   state = await corrupted.initialize();
   assert.equal(state.ready, true);
   assert.equal(state.profileExists, false);
+  assert.equal(state.profileArtifactExists, true);
   assert.ok(state.error);
   assert.equal((await corrupted.verify(wave('fangjun-test-sr-1.wav'))).matched, false);
   const corruptProfileBeforeRejectedDelete = await fsp.readFile(profilePath);
   await assert.rejects(() => corrupted.deleteProfile(), /有效声纹/);
   assert.deepEqual(await fsp.readFile(profilePath), corruptProfileBeforeRejectedDelete);
+  const orphan = path.join(dataRoot, 'speaker-profile.dat.tmp-123-00000000-0000-4000-8000-000000000001');
+  const unrelated = path.join(dataRoot, 'keep-me.txt');
+  await fsp.writeFile(orphan, Buffer.from('encrypted-temp'));
+  await fsp.writeFile(unrelated, 'keep');
+  state = await corrupted.deleteProfileArtifact();
+  assert.equal(state.profileArtifactExists, false);
+  assert.equal(fs.existsSync(profilePath), false);
+  assert.equal(fs.existsSync(orphan), false);
+  assert.equal(fs.existsSync(unrelated), true);
   await corrupted.dispose();
+
+  await fsp.writeFile(profilePath, Buffer.alloc(1));
+  await fsp.truncate(profilePath, constants.MAX_PROFILE_FILE_BYTES + 1);
+  const oversized = new SpeakerService({ workerPath, modelPath, dataRoot, profileCrypto });
+  state = await oversized.initialize();
+  assert.equal(state.ready, true);
+  assert.equal(state.profileExists, false);
+  assert.equal(state.profileArtifactExists, true);
+  assert.ok(state.error);
+  await oversized.deleteProfileArtifact();
+  assert.equal(fs.existsSync(profilePath), false);
+  await oversized.dispose();
+
   await fsp.rm(dataRoot, { recursive: true, force: true });
 
   console.log(JSON.stringify({
@@ -205,8 +276,12 @@ async function run() {
     contaminatedCandidatesDropped: true,
     multipleProfilesRetained: true,
     invalidProfileDeleteRejected: true,
+    usableProfileArtifactDeleteRejected: true,
+    inFlightEnrollmentCancelRolledBack: true,
     legacyProfileMigratedInMemory: true,
     corruptProfileFailedClosed: true,
+    corruptProfileUserDeletable: true,
+    oversizedProfileRejectedBeforeRead: true,
   }));
 }
 

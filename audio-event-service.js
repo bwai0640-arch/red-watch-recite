@@ -9,7 +9,7 @@ const MAX_SAMPLE_RATE = 96_000;
 const MIN_SAMPLE_SECONDS = 1.5;
 const MAX_SAMPLE_SECONDS = 6;
 const MAX_ABSOLUTE_SAMPLE = 1.25;
-const WORKER_TIMEOUT_MS = 20_000;
+const WORKER_TIMEOUT_MS = 5_000;
 const MAX_EVENTS = 600;
 
 class AudioEventServiceError extends Error {

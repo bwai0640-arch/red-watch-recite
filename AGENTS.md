@@ -16,7 +16,7 @@
 ## 项目边界
 
 - 应用源码和交付物的权威根目录是 `D:\RedWatchRecite`。不要把源码重新镜像到 C 盘工作目录；用户要求应用内容保留在 D 盘。
-- 当前可见产品名固定为“凛冬督学局”；当前源码版本为 `1.13.3`。1.13.3 候选交付物、大小与 SHA-256 必须来自本版隔离构建，不得沿用旧版数值。
+- 当前可见产品名固定为“凛冬督学局”；当前源码版本为 `1.13.4`。1.13.4 候选交付物、大小与 SHA-256 必须来自本版隔离构建，不得沿用旧版数值。
 - 应用标题下固定显示“原作：叛逆蓝牙 · 二创：眼泪斷了线”；README 开头必须先显示同一署名。署名不等于素材授权，不得据此跳过资产权利核验。
 - GitHub 发布目标为 `bwai0640-arch/red-watch-recite`。提交者使用该账号对应的 GitHub `noreply` 邮箱；任何 push 或 Release 上传前都必须复查实际提交历史、个人信息、密钥与发布附件。
 - `docs/USER_GUIDE.md` 是面向普通用户的使用说明权威副本；内容应以产品介绍、完整上手流程和实际操作为主，构建哈希、内部算法阈值、源码代号与测试边界归入发布/测试/架构文档。本地交付时必须复制为 `release-staging/使用说明.md` 并保持完全一致。
@@ -97,7 +97,7 @@
 - 最终对抗审查除代码边界外，还必须模拟刁难用户的连续/断续媒体、键盘混音、风扇、快速点击、菜单焦点、窗口拖缩、多屏边缘、休息与提醒返回等行为；后台模拟通过不得写成 Electron/UI/真实指针或麦克风实测通过。
 - `audio-event-model-smoke.cjs` 的发布候选门禁必须设置 `BEISHU_REQUIRE_AUDIO_EVENT_FIXTURES=1`，使用临时官方正样本和至少 3 份来源明确的键盘 fixture；这些 fixture 不得提交、打包或复制到用户数据目录。
 - UI/CDP 测试必须使用独立端口、隔离数据目录和全新实例。完整命令见 `docs/TESTING.md`。
-- 正式构建必须先输出到全新的 `work/release-candidate-<version>` 隔离目录；候选验证通过后，只把安装版、便携版和同步说明复制到 `release-staging`。不得让 electron-builder 直接清理 `release-staging`、含真实用户数据的 `dist` 或已安装目录。
+- 正式构建只能运行 `scripts/build-release.cjs`（`pnpm dist` 只是该包装器的入口），不得直接调用 electron-builder。包装器必须要求干净 Git 工作树和全新的 `work/release-candidate-1.13.4`，拒绝覆盖既有候选，也不得触碰 `dist`、`release-staging` 或已安装目录。候选验证通过后，只把安装版、便携版和同步说明复制到 `release-staging`。
 - 发布前要求用户退出凛冬督学局；不得覆盖旧 `dist` 或已安装应用。
 - 重新打包后必须重新计算安装版和便携版的大小与 SHA-256，并同步到 `docs/RELEASE.md`；用户说明与 `release-staging/使用说明.md` 仍须保持完全一致。
 - 本地交付目录仅保留安装版、便携版和同步后的说明书；不得交付 `win-unpacked`、`builder-debug.yml`、旧版 EXE 或测试目录。
