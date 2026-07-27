@@ -83,6 +83,14 @@ $artifacts | Get-FileHash -Algorithm SHA256
 
 将实际字节数和 SHA-256 写入本文件。候选完整通过后，再定点复制这两个 EXE，并把 `docs/USER_GUIDE.md` 复制为 `release-staging\使用说明.md`；确认两份说明完全一致。用户说明不承载构建哈希、内部算法阈值或测试日志。
 
+1.13.5 隔离候选已于 2026-07-27 完成构建与静态核对：
+
+- 安装版：286,482,214 字节；SHA-256 `74FDE28F439DCA782FE9FB54035EE808C9FC48D1BC0D52E69AF775D15EBB4668`；FileVersion/ProductVersion `1.13.5`；Authenticode `NotSigned`。
+- 便携版：275,813,004 字节；SHA-256 `4F563CD6467C8E2A9E5211FE646487884B6752447C3030E8C9653E069C516FA0`；FileVersion/ProductVersion `1.13.5`；Authenticode `NotSigned`。
+- 两次构建嵌入的 `app.asar` 一致；最终 `app.asar` 为 149,460,651 字节，SHA-256 `E83FEBA7107D46BD7F7B89F5D254C51946C6735E7D5C06BF0EFFF9C75FEC12AC`。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个运行文件；23 个核心源码哈希匹配，22 段动画、22 份对应源音轨、两套本地模型及第三方声明完整，禁止的用户数据、设置、测试 fixture、缓存和构建文件为 0。
+- `USER_GUIDE.md` 的 SHA-256 为 `2A70A671B5B33F7A11177FA57E5711142BE8762FEC1E68D97D2844AE8374038F`；源码隔离测试副本已由用户手动验证漂浮窗“隐藏”和“放大”真实可点。候选 EXE 未单独执行，仍需安装后做一次同样的人工确认。
+
 1.13.4 隔离候选已于 2026-07-27 完成后台静态核对，未启动任何 EXE：
 
 - 安装版：286,481,852 字节；SHA-256 `0279E7FA5EA1B4A0186D1A5834DE4F0DEEE57EF70EDF2E7C376522DA406E773E`；FileVersion/ProductVersion `1.13.4`；Authenticode `NotSigned`。
