@@ -3108,12 +3108,31 @@ UI.backgroundModeHidden.addEventListener('click', () => {
 UI.backgroundModeFloating.addEventListener('click', () => {
   setBackgroundMode('floating').catch(handleAuxiliaryUiError);
 });
-UI.floatingHideButton.addEventListener('click', () => {
-  hideWindowFromChrome('hidden').catch(handleAuxiliaryUiError);
-});
-UI.floatingExpandButton.addEventListener('click', () => {
-  window.desktopAPI.restoreSceneMode().catch(handleAuxiliaryUiError);
-});
+function bindFloatingAction(button, action) {
+  let lastNativePointerDownAt = Number.NEGATIVE_INFINITY;
+  const run = () => Promise.resolve(action()).catch(handleAuxiliaryUiError);
+
+  // A native draggable region can swallow the final synthetic click even when
+  // pointerdown reached the button.  Act on the first native button event and
+  // suppress the matching follow-up click; keyboard activation still uses
+  // click and remains supported.
+  button.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    lastNativePointerDownAt = performance.now();
+    run();
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (performance.now() - lastNativePointerDownAt < 750) return;
+    run();
+  });
+}
+
+bindFloatingAction(UI.floatingHideButton, () => hideWindowFromChrome('hidden'));
+bindFloatingAction(UI.floatingExpandButton, () => window.desktopAPI.restoreSceneMode());
 UI.windowMinimizeButton.addEventListener('click', () => {
   window.desktopAPI.minimizeWindow().catch(handleAuxiliaryUiError);
 });

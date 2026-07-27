@@ -225,6 +225,7 @@ assert.match(htmlSource, /id="background-choice-floating"[\s\S]*?>使用漂浮�
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.shell/);
 assert.match(cssSource, /body\[data-window-mode="floating"\]\.floating-hovered \.floating-hover-tools/);
 assert.doesNotMatch(cssSource, /body\[data-window-mode="floating"\]:hover \.floating-hover-tools/);
+assert.match(cssSource, /floating-hovered \.study-scene,[\s\S]*?top: 78px/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas/);
 assert.match(cssSource, /aspect-ratio: 16 \/ 9/);
 assert.match(cssSource, /\.floating-timer[^}]*white-space: nowrap/);
@@ -278,6 +279,7 @@ assert.match(
 );
 assert.match(appSource, /hideWindowFromChrome\('hidden'\)/);
 assert.match(appSource, /restoreSceneMode\(\)/);
+assert.match(appSource, /function bindFloatingAction\(button, action\)[\s\S]*?button\.addEventListener\('pointerdown'/);
 assert.match(appSource, /requestAnimationFrame\(\(\) => \{[\s\S]*requestAnimationFrame/);
 assert.match(appSource, /acknowledgeWindowMode\(\{ transitionId, mode \}\)/);
 assert.match(appSource, /forceRestoreSceneMode\(\)/);

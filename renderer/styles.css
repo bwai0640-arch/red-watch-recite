@@ -431,6 +431,15 @@ body[data-window-mode="floating"] .floating-hover-tools {
 }
 body[data-window-mode="floating"].floating-hovered .floating-hover-tools,
 body[data-window-mode="floating"]:focus-within .floating-hover-tools { opacity: 1; pointer-events: auto; }
+/*
+ * Electron resolves draggable regions natively.  Keeping the scene's drag
+ * surface beneath a visible control strip makes a visually topmost button
+ * susceptible to being treated as a window drag on Windows.  When the strip
+ * is available, reserve its rectangle instead of overlapping drag/no-drag
+ * regions and relying on their stacking order.
+ */
+body[data-window-mode="floating"].floating-hovered .study-scene,
+body[data-window-mode="floating"]:focus-within .study-scene { top: 78px; }
 .floating-timer { min-width: 96px; overflow: hidden; color: #ead5b4; cursor: move; font: 700 .72rem ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; -webkit-app-region: drag; }
 .floating-action {
   min-width: 40px;
