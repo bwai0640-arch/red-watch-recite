@@ -19,6 +19,7 @@ const { createProfileCrypto } = require('./profile-crypto');
 const {
   clampFloatingBounds,
   floatingWindowBounds,
+  pointInsideBounds,
   readBackgroundPreference,
   readFloatingWindowSize,
   resolveAlertReturnMode,
@@ -103,6 +104,8 @@ let inlineAlertState = null;
 let floatingRestoreBounds = null;
 let floatingManualMovePending = false;
 let floatingPreferredSize = null;
+let floatingHoverTimer = null;
+let floatingHoverInside = false;
 let unrestrictedWindowMaximumSize = null;
 let mainWindowSkipsTaskbar = false;
 let windowModeTransitionSequence = 0;
@@ -121,6 +124,7 @@ const sceneMinimumSize = Object.freeze({ width: 960, height: 540 });
 const floatingWindowSize = Object.freeze({ width: 320, height: 225 });
 const floatingWindowMinimumSize = Object.freeze({ width: 224, height: 170 });
 const floatingWindowMargin = 16;
+const floatingHoverPollIntervalMs = 80;
 const windowModeRenderTimeoutMs = 1000;
 
 floatingPreferredSize = readFloatingWindowSize(windowPreferencePath, {
@@ -222,6 +226,42 @@ function applyFloatingSizeConstraints() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setMinimumSize(floatingWindowMinimumSize.width, floatingWindowMinimumSize.height);
   mainWindow.setMaximumSize(floatingWindowSize.width, floatingWindowSize.height);
+}
+
+function sendFloatingHoverState(hovered, { force = false } = {}) {
+  const next = Boolean(hovered) && mainWindowMode === 'floating';
+  if (!force && floatingHoverInside === next) return;
+  floatingHoverInside = next;
+  const contents = mainWindow?.webContents;
+  if (!contents || contents.isDestroyed() || contents.isLoadingMainFrame()) return;
+  contents.send('floating-hover-changed', { hovered: next });
+}
+
+function sampleFloatingHoverState({ force = false } = {}) {
+  const window = mainWindow;
+  const hovered = Boolean(
+    window
+    && !window.isDestroyed()
+    && mainWindowMode === 'floating'
+    && window.isVisible()
+    && pointInsideBounds(screen.getCursorScreenPoint(), window.getBounds()),
+  );
+  sendFloatingHoverState(hovered, { force });
+}
+
+function stopFloatingHoverTracking() {
+  if (floatingHoverTimer) {
+    clearInterval(floatingHoverTimer);
+    floatingHoverTimer = null;
+  }
+  sendFloatingHoverState(false);
+}
+
+function startFloatingHoverTracking() {
+  if (floatingHoverTimer) clearInterval(floatingHoverTimer);
+  sampleFloatingHoverState({ force: true });
+  floatingHoverTimer = setInterval(sampleFloatingHoverState, floatingHoverPollIntervalMs);
+  floatingHoverTimer.unref?.();
 }
 
 function persistFloatingWindowSize() {
@@ -440,6 +480,7 @@ function setMainWindowSkipTaskbar(value) {
 
 function failClosedWindowTransition(expectedMode) {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  stopFloatingHoverTracking();
   inlineAlertState = null;
   mainWindowMode = 'hidden';
   mainWindow.setAlwaysOnTop(false);
@@ -553,6 +594,7 @@ function createMainWindow() {
     if (mainWindowMode === 'floating') persistFloatingWindowSize();
   });
   mainWindow.on('closed', () => {
+    stopFloatingHoverTracking();
     clearPendingWindowModeTransitions();
     mainWindow = null;
     unrestrictedWindowMaximumSize = null;
@@ -567,6 +609,7 @@ async function showSceneWindowNow({ force = false } = {}) {
   if (!force && mainWindowMode === 'alert' && inlineAlertState) {
     return { blockedByAlert: true, ...runtimeWindowState() };
   }
+  stopFloatingHoverTracking();
   if (mainWindowMode === 'scene' && !inlineAlertState) {
     mainWindow.setAlwaysOnTop(false);
     setMainWindowSkipTaskbar(false);
@@ -617,6 +660,7 @@ async function showFloatingWindowNow() {
     if (mainWindow.isMinimized()) mainWindow.restore();
     if (!mainWindow.isVisible()) mainWindow.showInactive();
     mainWindow.blur();
+    startFloatingHoverTracking();
     return runtimeWindowState();
   }
   inlineAlertState = null;
@@ -641,6 +685,7 @@ async function showFloatingWindowNow() {
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.showInactive();
   mainWindow.blur();
+  startFloatingHoverTracking();
   return runtimeWindowState();
 }
 
@@ -654,6 +699,7 @@ async function hideToBackgroundNow(mode = 'hidden') {
     return { blockedByAlert: true, ...runtimeWindowState() };
   }
   if (mode === 'floating') return showFloatingWindowNow();
+  stopFloatingHoverTracking();
   if (mainWindowMode === 'hidden') {
     mainWindow.hide();
     return runtimeWindowState();
@@ -678,6 +724,7 @@ async function revealForInlineAlertNow() {
   const returnMode = resolveAlertReturnMode(mainWindowMode, mainWindow.isVisible());
   const targetDisplay = currentDisplay();
   if (returnMode === 'floating') floatingRestoreBounds = mainWindow.getBounds();
+  stopFloatingHoverTracking();
   suppressBreakPromptForAlert();
   inlineAlertState = { alertId: ++inlineAlertSequence, returnMode };
   mainWindow.hide();
@@ -745,6 +792,7 @@ function runtimeWindowState() {
       resizable: false,
       minimizable: false,
       maximizable: false,
+      floatingHovered: false,
     };
   }
   const contents = window.webContents;
@@ -763,6 +811,7 @@ function runtimeWindowState() {
     resizable: window.isResizable(),
     minimizable: window.isMinimizable(),
     maximizable: window.isMaximizable(),
+    floatingHovered: floatingHoverInside,
   };
 }
 
@@ -1066,6 +1115,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopFloatingHoverTracking();
   destroyBreakPromptWindow();
   speakerService?.dispose().catch(() => {});
   audioEventService?.dispose().catch(() => {});

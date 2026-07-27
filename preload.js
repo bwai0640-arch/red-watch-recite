@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   onWindowModeChanged: (callback) => {
     return subscribe('window-mode-changed', callback);
   },
+  onFloatingHoverChanged: (callback) => {
+    return subscribe('floating-hover-changed', callback);
+  },
   onWindowMaximizedChanged: (callback) => {
     return subscribe('window-maximized-changed', callback);
   },

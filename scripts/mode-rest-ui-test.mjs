@@ -425,6 +425,254 @@ async function removeIsolatedRoot(testRoot) {
   }
 }
 
+function runEncodedPowerShell(script, timeout = 15_000) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`System cursor helper timed out after ${timeout} ms`));
+    }, timeout);
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+      reject(new Error(`System cursor helper failed (${code}): ${stderr.trim()}`));
+    });
+  });
+}
+
+async function moveSystemCursorRelativeToProcessWindow(processId, placement) {
+  assert(Number.isInteger(processId) && processId > 0, 'Invalid source process id');
+  assert(placement === 'inside' || placement === 'outside', 'Invalid native cursor placement');
+  const output = await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class BeishuNativeCursor {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  private static uint targetProcessId;
+  private static readonly List<IntPtr> visibleWindows = new List<IntPtr>();
+  private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetCursorPos(out POINT point);
+
+  [DllImport("user32.dll")]
+  private static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+  [DllImport("user32.dll")]
+  private static extern int GetSystemMetrics(int index);
+
+  public static POINT Move(uint processId, bool inside) {
+    if (SetThreadDpiAwarenessContext(PerMonitorAwareV2) == IntPtr.Zero) {
+      throw new InvalidOperationException("Unable to enter a per-monitor DPI-aware coordinate context.");
+    }
+    targetProcessId = processId;
+    visibleWindows.Clear();
+    EnumWindows(InspectWindow, IntPtr.Zero);
+    if (visibleWindows.Count != 1) {
+      throw new InvalidOperationException(
+        "Expected exactly one visible top-level source window, found " + visibleWindows.Count + "."
+      );
+    }
+    POINT before;
+    RECT rect;
+    if (!GetCursorPos(out before) || !GetWindowRect(visibleWindows[0], out rect)) {
+      throw new InvalidOperationException("Unable to inspect native cursor or window bounds.");
+    }
+    int x;
+    int y;
+    if (inside) {
+      x = rect.Left + ((rect.Right - rect.Left) / 2);
+      y = rect.Top + ((rect.Bottom - rect.Top) / 2);
+    } else {
+      POINT[] candidates = OutsideCandidates(rect);
+      bool found = false;
+      x = 0;
+      y = 0;
+      foreach (POINT candidate in candidates) {
+        if (InsideVirtualDesktop(candidate) && !InsideRect(candidate, rect)) {
+          x = candidate.X;
+          y = candidate.Y;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        throw new InvalidOperationException("Unable to choose a cursor point outside the source window.");
+      }
+    }
+    if (!SetCursorPos(x, y)) {
+      throw new InvalidOperationException("Unable to move the native cursor.");
+    }
+    return before;
+  }
+
+  private static bool InspectWindow(IntPtr hWnd, IntPtr lParam) {
+    uint processId;
+    RECT rect;
+    GetWindowThreadProcessId(hWnd, out processId);
+    if (processId != targetProcessId || !IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out rect)) {
+      return true;
+    }
+    long width = Math.Max(0, rect.Right - rect.Left);
+    long height = Math.Max(0, rect.Bottom - rect.Top);
+    if (width > 0 && height > 0) visibleWindows.Add(hWnd);
+    return true;
+  }
+
+  private static POINT[] OutsideCandidates(RECT rect) {
+    int centerX = rect.Left + ((rect.Right - rect.Left) / 2);
+    int centerY = rect.Top + ((rect.Bottom - rect.Top) / 2);
+    return new POINT[] {
+      new POINT { X = rect.Left - 32, Y = centerY },
+      new POINT { X = rect.Right + 32, Y = centerY },
+      new POINT { X = centerX, Y = rect.Top - 32 },
+      new POINT { X = centerX, Y = rect.Bottom + 32 }
+    };
+  }
+
+  private static bool InsideRect(POINT point, RECT rect) {
+    return point.X >= rect.Left && point.X < rect.Right
+      && point.Y >= rect.Top && point.Y < rect.Bottom;
+  }
+
+  private static bool InsideVirtualDesktop(POINT point) {
+    const int SmXVirtualScreen = 76;
+    const int SmYVirtualScreen = 77;
+    const int SmCxVirtualScreen = 78;
+    const int SmCyVirtualScreen = 79;
+    int left = GetSystemMetrics(SmXVirtualScreen);
+    int top = GetSystemMetrics(SmYVirtualScreen);
+    int right = left + GetSystemMetrics(SmCxVirtualScreen);
+    int bottom = top + GetSystemMetrics(SmCyVirtualScreen);
+    return point.X >= left && point.X < right && point.Y >= top && point.Y < bottom;
+  }
+}
+'@
+$before = [BeishuNativeCursor]::Move([uint32]${processId}, [bool]::Parse('${placement === 'inside'}'))
+Write-Output ($before.X.ToString() + "," + $before.Y.ToString())
+`);
+  const match = output.match(/(-?\d+),(-?\d+)\s*$/);
+  assert(match, `Unexpected native cursor helper output: ${output}`);
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+async function getSystemCursorPosition() {
+  const output = await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class BeishuCursorSnapshot {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
+  }
+
+  [DllImport("user32.dll")]
+  public static extern bool GetCursorPos(out POINT point);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+}
+'@
+if ([BeishuCursorSnapshot]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) {
+  throw "Unable to enter a per-monitor DPI-aware coordinate context."
+}
+$point = New-Object BeishuCursorSnapshot+POINT
+if (-not [BeishuCursorSnapshot]::GetCursorPos([ref]$point)) {
+  throw "Unable to capture the native cursor."
+}
+Write-Output ($point.X.ToString() + "," + $point.Y.ToString())
+`);
+  const match = output.match(/(-?\d+),(-?\d+)\s*$/);
+  assert(match, `Unexpected native cursor snapshot output: ${output}`);
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+async function restoreSystemCursor(point) {
+  if (!point) return;
+  await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class BeishuCursorRestore {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+}
+'@
+if ([BeishuCursorRestore]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) {
+  throw "Unable to enter a per-monitor DPI-aware coordinate context."
+}
+if (-not [BeishuCursorRestore]::SetCursorPos(${Math.round(point.x)}, ${Math.round(point.y)})) {
+  throw "Unable to restore the native cursor."
+}
+`);
+}
+
 const isolatedRoot = fs.mkdtempSync(path.join(workRoot, 'mode-rest-ui-'));
 const debugPort = await reserveDebugPort();
 const childEnvironment = {
@@ -453,6 +701,7 @@ appProcess.stderr.on('data', captureChildOutput);
 
 let main = null;
 let prompt = null;
+let originalSystemCursor = null;
 const report = {
   source: {
     executable: electronExecutable,
@@ -546,9 +795,12 @@ try {
   `Invalid study settings payload changed durable settings: ${JSON.stringify(report.ipcBoundary)}`);
   assert(report.ipcBoundary.popupBlocked, 'Main renderer was allowed to create a new window');
 
+  report.floatingBefore = await main.evaluate(`window.desktopAPI.getRuntimeWindowState()`);
+  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
+  originalSystemCursor = await getSystemCursorPosition();
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'outside');
+  await wait(300);
   report.floatingShell = await main.evaluate(`(async () => {
-    const before = await window.desktopAPI.getRuntimeWindowState();
-    await window.desktopAPI.hideToBackground('floating');
     const statusbar = document.querySelector('#floating-statusbar');
     const canvas = document.querySelector('#study-scene-canvas');
     const hoverTools = document.querySelector('.floating-hover-tools');
@@ -556,9 +808,7 @@ try {
     const hideButton = document.querySelector('#floating-hide-button');
     const expandButton = document.querySelector('#floating-expand-button');
     const canvasRect = canvas.getBoundingClientRect();
-    const statusRect = statusbar.getBoundingClientRect();
     return {
-      before,
       runtime: await window.desktopAPI.getRuntimeWindowState(),
       statusbarVisible: statusbar.getClientRects().length > 0,
       shellVisible: document.querySelector('.shell').getClientRects().length > 0,
@@ -576,7 +826,6 @@ try {
       },
       canvasAspect: canvasRect.width / canvasRect.height,
       canvasIdentityStable: canvas === document.querySelector('#study-scene-canvas'),
-      hoverPoint: { x: statusRect.left + statusRect.width / 2, y: statusRect.top + statusRect.height / 2 },
     };
   })()`);
   assert(report.floatingShell.runtime.mode === 'floating'
@@ -610,23 +859,31 @@ try {
     && report.floatingShell.dragRegions.expandButton === 'no-drag',
   `Floating drag and button hit regions overlap incorrectly: ${JSON.stringify(report.floatingShell.dragRegions)}`);
 
-  await main.send('Input.dispatchMouseEvent', {
-    type: 'mouseMoved',
-    x: report.floatingShell.hoverPoint.x,
-    y: report.floatingShell.hoverPoint.y,
-  });
-  await wait(200);
-  report.floatingHover = await main.evaluate(`(() => ({
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
+  report.floatingHover = await main.evaluate(`(async () => ({
     opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
     timer: document.querySelector('#floating-timer').textContent.trim(),
     hideVisible: document.querySelector('#floating-hide-button').getClientRects().length > 0,
     expandVisible: document.querySelector('#floating-expand-button').getClientRects().length > 0,
+    runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
   }))()`);
   assert(report.floatingHover.opacity === '1'
+    && report.floatingHover.runtimeHovered
     && /^已学习 \\d{2}:\\d{2}(?::\\d{2})?$/.test(report.floatingHover.timer)
     && report.floatingHover.hideVisible
     && report.floatingHover.expandVisible,
   `Floating hover tools or elapsed timer are unavailable: ${JSON.stringify(report.floatingHover)}`);
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'outside');
+  await wait(300);
+  report.floatingLeave = await main.evaluate(`(async () => ({
+    opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+    runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
+  }))()`);
+  assert(report.floatingLeave.opacity === '0' && !report.floatingLeave.runtimeHovered,
+    `Floating hover tools did not hide after the real cursor left: ${JSON.stringify(report.floatingLeave)}`);
+  await restoreSystemCursor(originalSystemCursor);
+  originalSystemCursor = null;
 
   report.floatingAlertReturn = await main.evaluate(`(async () => {
     const revealed = await window.desktopAPI.revealForInlineAlert();
@@ -2091,6 +2348,15 @@ try {
   if (childOutput) error.message = `${error.message}\nSource instance output:\n${childOutput}`;
   throw error;
 } finally {
+  let cursorRestoreFailure = null;
+  if (originalSystemCursor) {
+    try {
+      await restoreSystemCursor(originalSystemCursor);
+      originalSystemCursor = null;
+    } catch (error) {
+      cursorRestoreFailure = error;
+    }
+  }
   if (main) {
     await main.evaluate(`(async () => {
       await stopSession(false, true).catch(() => {});
@@ -2109,4 +2375,5 @@ try {
   prompt?.close();
   main?.close();
   await removeIsolatedRoot(isolatedRoot);
+  if (cursorRestoreFailure) throw cursorRestoreFailure;
 }

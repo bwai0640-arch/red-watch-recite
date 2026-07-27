@@ -71,6 +71,7 @@ assert.match(floatingFunction, /setAlwaysOnTop\(true, 'floating'\)/);
 assert.match(floatingFunction, /setMainWindowSkipTaskbar\(true\)/);
 assert.match(floatingFunction, /applyFloatingSizeConstraints\(\)/);
 assert.match(floatingFunction, /setResizable\(true\)/);
+assert.match(floatingFunction, /startFloatingHoverTracking\(\)/);
 assert.doesNotMatch(floatingFunction, /new BrowserWindow/);
 const floatingTransition = floatingFunction.slice(floatingFunction.indexOf('mainWindow.hide()'));
 assertOrdered(
@@ -94,6 +95,7 @@ const sceneFunction = section(
 );
 const sceneTransition = sceneFunction.slice(sceneFunction.indexOf('const targetDisplay = currentDisplay()'));
 assert.match(sceneFunction, /mainWindowMode === 'alert' && inlineAlertState/);
+assert.match(sceneFunction, /stopFloatingHoverTracking\(\)/);
 assertOrdered(
   sceneTransition,
   [
@@ -129,6 +131,7 @@ assertOrdered(
 );
 assert.match(alertFunction, /if \(!rendered\)[\s\S]*failClosedWindowTransition\('alert'\)/);
 assert.match(alertFunction, /throw Object\.assign\(new Error/);
+assert.match(alertFunction, /stopFloatingHoverTracking\(\)/);
 assert.ok(
   alertFunction.indexOf('applySceneSizeConstraints()') >= 0
     && alertFunction.indexOf('applySceneSizeConstraints()') < alertFunction.indexOf('mainWindow.setBounds('),
@@ -177,6 +180,12 @@ assert.match(mainSource, /persistFloatingWindowSize/);
 assert.match(mainSource, /readFloatingWindowSize/);
 assert.match(mainSource, /writeFloatingWindowSize/);
 assert.match(mainSource, /floatingWindowMinimumSize = Object\.freeze\(\{ width: 224, height: 170 \}\)/);
+assert.match(mainSource, /const floatingHoverPollIntervalMs = 80/);
+assert.match(mainSource, /screen\.getCursorScreenPoint\(\)/);
+assert.match(mainSource, /pointInsideBounds\(screen\.getCursorScreenPoint\(\), window\.getBounds\(\)\)/);
+assert.match(mainSource, /contents\.send\('floating-hover-changed', \{ hovered: next \}\)/);
+assert.match(mainSource, /function stopFloatingHoverTracking\(\)[\s\S]*?clearInterval\(floatingHoverTimer\)/);
+assert.match(mainSource, /app\.on\('before-quit',[\s\S]*?stopFloatingHoverTracking\(\)/);
 assert.doesNotMatch(mainSource, /suppressFloatingBoundsCapture|setImmediate\(.*Floating/);
 
 assert.match(preloadSource, /hideToBackground: \(mode\).*\{ mode \}/);
@@ -184,6 +193,7 @@ assert.match(preloadSource, /setBackgroundPreference: \(mode\).*\{ mode \}/);
 assert.match(preloadSource, /acknowledgeWindowMode: \(payload\).*window-mode-ready/);
 assert.match(preloadSource, /forceRestoreSceneMode/);
 assert.match(preloadSource, /onWindowCloseRequested/);
+assert.match(preloadSource, /onFloatingHoverChanged:[\s\S]*?subscribe\('floating-hover-changed'/);
 assert.doesNotMatch(preloadSource, /ipcRenderer\.send\([^)]*floating/);
 
 const floatingMarkup = htmlSource.match(/<section id="floating-statusbar"[\s\S]*?<\/section>/)?.[0] || '';
@@ -204,7 +214,8 @@ assert.match(htmlSource, /id="background-choice-hidden"[\s\S]*?>完全隐藏<\/b
 assert.match(htmlSource, /id="background-choice-floating"[\s\S]*?>使用漂浮窗<\/button>/);
 
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.shell/);
-assert.match(cssSource, /body\[data-window-mode="floating"\]:hover \.floating-hover-tools/);
+assert.match(cssSource, /body\[data-window-mode="floating"\]\.floating-hovered \.floating-hover-tools/);
+assert.doesNotMatch(cssSource, /body\[data-window-mode="floating"\]:hover \.floating-hover-tools/);
 assert.match(cssSource, /body\[data-window-mode="floating"\] \.study-scene canvas/);
 assert.match(cssSource, /aspect-ratio: 16 \/ 9/);
 assert.match(cssSource, /\.floating-timer[^}]*white-space: nowrap/);
@@ -239,6 +250,14 @@ assert.doesNotMatch(appSource, /floatingAnomaly|renderFloatingAnomaly|setFloatin
 assert.doesNotMatch(cssSource, /\.floating-anomaly-time\s*\{/);
 assert.doesNotMatch(cssSource, /:(?:hover|focus-within) \.floating-voice-state[^{]*\{[^}]*opacity:\s*0/);
 assert.match(appSource, /UI\.floatingTimer\.textContent = `已学习 \$\{elapsed\}`/);
+assert.match(
+  appSource,
+  /onFloatingHoverChanged\([\s\S]*?classList\.toggle\([\s\S]*?'floating-hovered'[\s\S]*?state\.windowMode === 'floating'[\s\S]*?payload\?\.hovered === true/,
+);
+assert.match(
+  appSource,
+  /function applyWindowMode\(mode\)[\s\S]*?if \(mode !== 'floating'\) document\.body\.classList\.remove\('floating-hovered'\)/,
+);
 assert.match(appSource, /hideWindowFromChrome\('hidden'\)/);
 assert.match(appSource, /restoreSceneMode\(\)/);
 assert.match(appSource, /requestAnimationFrame\(\(\) => \{[\s\S]*requestAnimationFrame/);

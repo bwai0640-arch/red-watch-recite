@@ -23,7 +23,7 @@
 ```powershell
 $node = '<工作区依赖定位结果中的 Node.js executable>'
 cd D:\RedWatchRecite
-$candidate = 'work\release-candidate-1.13.2'
+$candidate = 'work\release-candidate-1.13.3'
 if (Test-Path -LiteralPath $candidate) { throw "候选目录已存在，请换一个全新目录：$candidate" }
 & $node '.\node_modules\electron-builder\cli.js' --win nsis --config.directories.output=$candidate
 & $node '.\node_modules\electron-builder\cli.js' --win portable --config.directories.output=$candidate --config.win.artifactName='凛冬督学局-便携版-${version}.${ext}'
@@ -75,6 +75,13 @@ Copy-Item -LiteralPath 'D:\RedWatchRecite\docs\USER_GUIDE.md' -Destination 'D:\R
 ```
 
 将实际字节数和 SHA-256 写入本文件，随后复制面向用户的说明到 `release-staging\使用说明.md`，并确认它与 `docs/USER_GUIDE.md` 完全一致。用户说明不承载构建哈希、内部算法阈值或测试日志。
+
+1.13.3 隔离候选已于 2026-07-27 完成后台静态核对，未启动任何 EXE：
+
+- 安装版：286,475,613 字节；SHA-256 `B213920D929266FC995AE560E9EF4E01B480305AB045F7D797A006E68EC47E15`；FileVersion/ProductVersion `1.13.3`；Authenticode `NotSigned`。
+- 便携版：275,807,614 字节；SHA-256 `603CDF42EB855B4389EC3701D37A9285B7EF2E3608D88B4E951922B9F501CD62`；FileVersion/ProductVersion `1.13.3`；Authenticode `NotSigned`。
+- `app.asar` 355 项，`app.asar.unpacked` 31 个文件；19 个核心源码与当前工作树逐字节哈希一致；22 段动画、22 份对应源音轨及两套本地模型完整；禁止项 0。
+- `USER_GUIDE.md` 与待复制的 `release-staging/使用说明.md` 内容 SHA-256 应为 `262E54046F8113C83357F5EDC5B9A7E253C9921A02909C80F5FE4AE80C1C8209`；交付目录最终只允许两份 1.13.3 EXE 和该说明书。
 
 1.13.2 隔离候选已于 2026-07-26 完成后台静态核对，未启动任何 EXE：
 

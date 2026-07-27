@@ -6,7 +6,7 @@
 - UI/CDP 测试必须使用隔离的数据目录和独立调试端口。
 - `speaker-ui-test.mjs` 与 `adversarial-ui-test.mjs` 会调用 `deleteSpeakerProfile()` 并退出被测应用，绝不能连接真实用户正在使用的安装版。
 - 不要读取、复制或删除真实 `%APPDATA%\背书自习监督\speaker-profile.dat` 来“准备测试”。这个旧数据根在产品改名为“凛冬督学局”后仍刻意保留，不能把路径中的旧名误判为待迁移项。
-- 1.13.2 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
+- 1.13.3 本轮只运行后台纯 Node 测试：没有启动 Electron、候选 EXE、窗口、托盘、CDP/UI、真实麦克风或真实声纹。后台结果不能替代 UI、候选包与发布附件门禁。
 
 ## Node 路径
 
@@ -66,16 +66,16 @@ cd D:\RedWatchRecite
 | `speaker-service-test.cjs` | mic-only、8 选 6、0.55/0.70、加密档案形态、污染候选、损坏档案 fail closed，以及实际 CAM++ 两秒本人/他人快速门槛 |
 | `speaker-runtime-policy-test.cjs` | 2 秒严格快速门槛、2.4 秒标准兜底、停声竞态、多模板最佳匹配，以及正式阈值不降低 |
 | `profile-crypto-test.cjs` | 当前 Windows 用户 DPAPI 的加密、非明文保存与跨独立子进程解密；不读写用户声纹档案 |
-| `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、224×170～320×225 尺寸钳制/持久化，以及偏好原子覆盖与损坏回退 |
-| `floating-window-source-test.cjs` | 同主窗口/Canvas、全区域拖动与按钮 no-drag、漂浮窗无音量/底噪控件、hover/focus 后台菜单、取消双击放大、黄色动画状态和提醒原状态返回的源码门禁 |
+| `window-mode-policy-test.cjs` | `hidden/floating` 严格参数、提醒编号/返回处置、多屏负坐标、224×170～320×225 尺寸钳制/持久化、系统指针窗口内判定，以及偏好原子覆盖与损坏回退 |
+| `floating-window-source-test.cjs` | 同主窗口/Canvas、全区域拖动与按钮 no-drag、真实系统指针驱动的悬停显隐、漂浮窗无音量/底噪控件、hover/focus 后台菜单、取消双击放大、黄色动画状态和提醒原状态返回的源码门禁 |
 | `adversarial-user-simulation-test.cjs` | 连续/断续视频、4/5 秒恢复边界、键盘/风扇/纯游戏音效，用户端底噪控件完全移除、声纹在途禁止处罚/5 秒失败关闭，以及漂浮缩放、多屏、偏好损坏、菜单和黄色文案等刁难用户场景 |
 | `release-package-static-test.cjs <candidate-root>` | 不运行 EXE，直接核对候选 `app.asar` 的版本、核心源码哈希、22 段动画/22 份源音轨、模型/原生依赖和用户数据排除项 |
 
 `speaker-service-test.cjs` 只使用并清理 `work/speaker-service-test-data`。若修改该路径，必须重新确认不会指向用户数据。
 
-### 1.13.2 本轮验证边界
+### 1.13.3 本轮验证边界
 
-2026-07-26 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。1.13.2 候选的构建、解包、核心源码哈希和禁止项核对结果见 `RELEASE.md`。
+2026-07-27 本轮只记录后台纯 Node 门禁；已通过项以本轮终端结果为准。没有启动 Electron、UI/CDP、候选 EXE、窗口、托盘、真实麦克风或真实声纹，因此不把源码断言写成真实界面实测。1.13.3 候选的构建、解包、核心源码哈希和禁止项核对结果见 `RELEASE.md`。
 
 “刁难用户”审查至少覆盖：
 

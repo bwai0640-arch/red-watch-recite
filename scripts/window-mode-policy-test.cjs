@@ -7,6 +7,7 @@ const {
   clampFloatingBounds,
   floatingWindowBounds,
   normalizeFloatingWindowSize,
+  pointInsideBounds,
   readBackgroundPreference,
   readFloatingWindowSize,
   resolveAlertReturnMode,
@@ -25,6 +26,25 @@ function overlaps(first, second) {
 }
 
 async function main() {
+  assert.equal(
+    pointInsideBounds({ x: 100, y: 200 }, { x: 100, y: 200, width: 320, height: 225 }),
+    true,
+  );
+  assert.equal(
+    pointInsideBounds({ x: 419, y: 424 }, { x: 100, y: 200, width: 320, height: 225 }),
+    true,
+  );
+  assert.equal(
+    pointInsideBounds({ x: 420, y: 424 }, { x: 100, y: 200, width: 320, height: 225 }),
+    false,
+  );
+  assert.equal(
+    pointInsideBounds({ x: -1600, y: -200 }, { x: -1600, y: -200, width: 320, height: 225 }),
+    true,
+  );
+  assert.equal(pointInsideBounds({ x: 0, y: 0 }, { x: 0, y: 0, width: 0, height: 10 }), false);
+  assert.equal(pointInsideBounds({ x: Number.NaN, y: 0 }, { x: 0, y: 0, width: 10, height: 10 }), false);
+
   assert.deepEqual(validateBackgroundModePayload({ mode: 'hidden' }), { mode: 'hidden' });
   assert.deepEqual(validateBackgroundModePayload({ mode: 'floating' }), { mode: 'floating' });
   assert.throws(() => validateBackgroundModePayload({ mode: 'floating', extra: true }), /参数/);

@@ -2735,6 +2735,7 @@ async function startSession() {
 function applyWindowMode(mode) {
   state.windowMode = mode;
   document.body.dataset.windowMode = mode;
+  if (mode !== 'floating') document.body.classList.remove('floating-hovered');
   if ((mode === 'hidden' || mode === 'floating') && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已转入后台，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
@@ -2994,6 +2995,12 @@ window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId =
   if (minimized && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已最小化，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
+});
+window.desktopAPI.onFloatingHoverChanged((payload) => {
+  document.body.classList.toggle(
+    'floating-hovered',
+    state.windowMode === 'floating' && payload?.hovered === true,
+  );
 });
 window.desktopAPI.onWindowMaximizedChanged(({ maximized }) => setWindowMaximizedControl(maximized));
 window.desktopAPI.onWindowCloseRequested(() => {

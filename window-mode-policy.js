@@ -11,6 +11,16 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
+function pointInsideBounds(point, bounds) {
+  if (!isPlainObject(point) || !isPlainObject(bounds)) return false;
+  const values = [point.x, point.y, bounds.x, bounds.y, bounds.width, bounds.height];
+  if (!values.every(Number.isFinite) || bounds.width <= 0 || bounds.height <= 0) return false;
+  return point.x >= bounds.x
+    && point.x < bounds.x + bounds.width
+    && point.y >= bounds.y
+    && point.y < bounds.y + bounds.height;
+}
+
 function validateExactModePayload(payload, key, allowedValues, message) {
   if (!isPlainObject(payload)) throw new Error(message);
   const keys = Reflect.ownKeys(payload);
@@ -228,6 +238,7 @@ module.exports = {
   floatingWindowBounds,
   normalizeBackgroundMode,
   normalizeFloatingWindowSize,
+  pointInsideBounds,
   readBackgroundPreference,
   readFloatingWindowSize,
   resolveAlertReturnMode,

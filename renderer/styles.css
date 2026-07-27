@@ -427,7 +427,7 @@ body[data-window-mode="floating"] .floating-statusbar {
   transition: opacity .15s ease;
   -webkit-app-region: drag;
 }
-body[data-window-mode="floating"]:hover .floating-hover-tools,
+body[data-window-mode="floating"].floating-hovered .floating-hover-tools,
 body[data-window-mode="floating"]:focus-within .floating-hover-tools { opacity: 1; pointer-events: auto; }
 .floating-timer { min-width: 96px; overflow: hidden; color: #ead5b4; cursor: move; font: 700 .72rem ui-monospace, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; -webkit-app-region: drag; }
 .floating-action {
