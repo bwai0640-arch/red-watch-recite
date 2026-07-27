@@ -15,7 +15,7 @@
 - 不触碰旧便携版的 `RedWatchReciteData`，也不迁移其中的声纹档案。
 - 确认 `package.json`、`CHANGELOG.md`、`docs/USER_GUIDE.md` 的版本号一致。
 - 确认 Git 工作树完全干净；安全包装器会拒绝未提交或未跟踪的修改。
-- 确认 `work\release-candidate-1.13.4` 不存在。包装器不会覆盖旧候选；需要重建时必须先人工核对旧目录是否仍被进程或审查引用，再选择新的、明确的处置。
+- 确认 `work\release-candidate-1.13.5` 不存在。包装器不会覆盖旧候选；需要重建时必须先人工核对旧目录是否仍被进程或审查引用，再选择新的、明确的处置。
 - 核对 `models/audio-tagging-ced-mini/SOURCE_README.md` 中模型和标签 SHA-256；保留“k2-fsa 转换 ONNX 的精确 checkpoint/许可尚未由随包 README 明确”的限定，不能把任一上游页面的许可直接写成该转换文件的确定许可。
 
 ## 2. 构建安装版与便携版
@@ -25,7 +25,7 @@
 ```powershell
 $node = '<工作区依赖定位结果中的 Node.js executable>'
 cd D:\RedWatchRecite
-$candidate = 'work\release-candidate-1.13.4'
+$candidate = 'work\release-candidate-1.13.5'
 if (Test-Path -LiteralPath $candidate) { throw "候选目录已存在，拒绝覆盖：$candidate" }
 if (git status --porcelain=v1 --untracked-files=all) { throw 'Git 工作树不干净，拒绝正式构建。' }
 & $node '.\scripts\build-release.cjs'
@@ -33,13 +33,13 @@ if (git status --porcelain=v1 --untracked-files=all) { throw 'Git 工作树不�
 
 不得复制脚本内部的 electron-builder 命令到终端单独运行。包装器会依次构建安装版和便携版，确认两次构建嵌入相同的 `app.asar`，核对构建前后 Git 跟踪输入没有变化，并自动运行 `release-package-static-test.cjs`；任一步失败都不能把目录当成候选发布。
 
-1.13.4 隔离候选安装包应为：
+1.13.5 隔离候选安装包应为：
 
-`D:\RedWatchRecite\work\release-candidate-1.13.4\凛冬督学局-安装版-1.13.4.exe`
+`D:\RedWatchRecite\work\release-candidate-1.13.5\凛冬督学局-安装版-1.13.5.exe`
 
 候选便携版应为：
 
-`D:\RedWatchRecite\work\release-candidate-1.13.4\凛冬督学局-便携版-1.13.4.exe`
+`D:\RedWatchRecite\work\release-candidate-1.13.5\凛冬督学局-便携版-1.13.5.exe`
 
 隔离候选目录还会生成 `win-unpacked\凛冬督学局.exe`；本轮不运行 UI，只做包内容检查，完成后不把该目录复制到交付目录。
 

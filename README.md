@@ -10,7 +10,7 @@
 
 作者角色与署名边界见 [作者与署名](AUTHORS.md)，媒体素材的来源和公开边界见 [资产来源与权利说明](docs/ASSET_PROVENANCE.md)。
 
-当前源码版本为 1.13.4，发布日期为 2026-07-27。
+当前源码版本为 1.13.5，发布日期为 2026-07-27。
 
 ## 本地成品与 GitHub 仓库
 
@@ -70,7 +70,7 @@ pnpm start
 
 ## 构建
 
-正式构建只能执行安全包装器 `scripts/build-release.cjs`；`pnpm dist` 已配置为调用同一脚本。包装器要求 Git 工作树干净，且 `work/release-candidate-1.13.4` 尚不存在；它拒绝覆盖候选目录，不把输出指向 `dist` 或 `release-staging`，构建前后核对受 Git 跟踪的输入、比较安装版与便携版中的 `app.asar`，并自动运行候选包静态检查。不要绕过包装器直接调用 electron-builder。候选验证通过后，才可只把两个 EXE 和同步说明书复制到 `release-staging`；完整流程见 [发布清单](docs/RELEASE.md)。
+正式构建只能执行安全包装器 `scripts/build-release.cjs`；`pnpm dist` 已配置为调用同一脚本。包装器要求 Git 工作树干净，且 `work/release-candidate-1.13.5` 尚不存在；它拒绝覆盖候选目录，不把输出指向 `dist` 或 `release-staging`，构建前后核对受 Git 跟踪的输入、比较安装版与便携版中的 `app.asar`，并自动运行候选包静态检查。不要绕过包装器直接调用 electron-builder。候选验证通过后，才可只把两个 EXE 和同步说明书复制到 `release-staging`；完整流程见 [发布清单](docs/RELEASE.md)。
 
 公开仓库包含完整媒体和图标，可按上述流程启动并构建。正式 `凛冬督学局.exe` 不提交到 Git 历史，后续作为 GitHub Release 附件单独提供。
 
