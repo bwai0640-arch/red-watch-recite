@@ -5,6 +5,7 @@ const {
   Menu,
   Tray,
   nativeImage,
+  powerMonitor,
   protocol,
   screen,
   session,
@@ -14,7 +15,26 @@ const fsSync = require('node:fs');
 const fs = require('node:fs/promises');
 const { spawn } = require('node:child_process');
 const { SpeakerService } = require('./speaker-service');
+const { AudioEventService } = require('./audio-event-service');
 const { createProfileCrypto } = require('./profile-crypto');
+const {
+  clampFloatingBounds,
+  floatingWindowBounds,
+  pointInsideBounds,
+  readBackgroundPreference,
+  readFloatingWindowSize,
+  resolveAlertReturnMode,
+  validateBackgroundModePayload,
+  validateFinishAlertPayload,
+  validateWindowModeReadyPayload,
+  writeBackgroundPreference,
+  writeFloatingWindowSize,
+} = require('./window-mode-policy');
+const {
+  readStudySettings,
+  validateStudySettingsPayload,
+  writeStudySettings,
+} = require('./study-settings-policy');
 
 const presentationCanvas = { width: 1920, height: 1080 };
 const mainRendererUrl = 'rwt://renderer/index.html';
@@ -22,17 +42,63 @@ const breakPromptRendererUrl = 'rwt://renderer/break-prompt.html';
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 app.commandLine.appendSwitch('disable-http-cache');
-app.setName('背书自习监督');
+app.setName('凛冬督学局');
+if (app.isPackaged) {
+  app.commandLine.removeSwitch('remote-debugging-port');
+  app.commandLine.removeSwitch('remote-debugging-pipe');
+}
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) app.quit();
+const testHooksEnabled = !app.isPackaged
+  && process.env.SUPERVISION_TEST_HOOKS === '1';
 
-// Keep deliberately saved speaker data separate from Chromium's per-run files.
+// Keep the legacy data directory stable across the visible product rename. It
+// may contain the user's existing encrypted speaker profile and preferences.
 const persistentDataRoot = process.env.SUPERVISION_DATA_DIR
   || path.join(app.getPath('appData'), '背书自习监督');
 fsSync.mkdirSync(persistentDataRoot, { recursive: true });
+app.setPath('userData', persistentDataRoot);
+const windowPreferencePath = path.join(persistentDataRoot, 'window-preferences.json');
+const studySettingsPath = path.join(persistentDataRoot, 'study-preferences.json');
 const transientSessionParent = path.join(persistentDataRoot, 'TransientElectronData');
+
+function removeTransientPathNoFollow(target) {
+  const stats = fsSync.lstatSync(target);
+  if (stats.isSymbolicLink()) {
+    fsSync.unlinkSync(target);
+  } else if (stats.isDirectory()) {
+    fsSync.rmSync(target, { recursive: true, force: true });
+  } else {
+    fsSync.unlinkSync(target);
+  }
+}
+
+try {
+  const transientParentStats = fsSync.lstatSync(transientSessionParent);
+  if (!transientParentStats.isDirectory() || transientParentStats.isSymbolicLink()) {
+    removeTransientPathNoFollow(transientSessionParent);
+  }
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 fsSync.mkdirSync(transientSessionParent, { recursive: true });
 
 for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: true })) {
-  if (!entry.isDirectory() || !/^run-(\d+)$/.test(entry.name)) continue;
+  if (!/^run-(\d+)$/.test(entry.name)) continue;
+  const stalePath = path.join(transientSessionParent, entry.name);
+  let staleStats;
+  try {
+    staleStats = fsSync.lstatSync(stalePath);
+  } catch {
+    continue;
+  }
+  if (staleStats.isSymbolicLink()) {
+    try {
+      fsSync.unlinkSync(stalePath);
+    } catch {}
+    continue;
+  }
+  if (!staleStats.isDirectory()) continue;
   const stalePid = Number(entry.name.slice('run-'.length));
   let stillRunning = false;
   try {
@@ -40,15 +106,22 @@ for (const entry of fsSync.readdirSync(transientSessionParent, { withFileTypes: 
     stillRunning = true;
   } catch {}
   if (!stillRunning) {
-    fsSync.rmSync(path.join(transientSessionParent, entry.name), { recursive: true, force: true });
+    try {
+      removeTransientPathNoFollow(stalePath);
+    } catch {}
   }
 }
 
 const transientSessionDataRoot = path.join(transientSessionParent, `run-${process.pid}`);
+try {
+  removeTransientPathNoFollow(transientSessionDataRoot);
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 fsSync.mkdirSync(transientSessionDataRoot, { recursive: true });
-// Keep Electron's default, stable userData path for Windows safeStorage. Only
-// sessionData is per-run and cleaned on exit, so browser session caches do not
-// become durable application data.
+// userData remains pinned to the legacy stable directory for Windows
+// safeStorage. Only sessionData is per-run and cleaned on exit, so browser
+// session caches do not become durable application data.
 app.setPath('sessionData', transientSessionDataRoot);
 const runtimeSessionPartition = 'rwt-runtime';
 
@@ -70,14 +143,49 @@ let tray = null;
 let isQuitting = false;
 let mainWindowMode = 'scene';
 let speakerService = null;
+let audioEventService = null;
 let breakPromptWindow = null;
 let breakPromptState = null;
+let breakPromptSuppressedForAlert = false;
 let isDestroyingBreakPrompt = false;
 let runtimeSession = null;
+let inlineAlertSequence = 0;
+let inlineAlertState = null;
+let floatingRestoreBounds = null;
+let floatingManualMovePending = false;
+let floatingPreferredSize = null;
+let floatingHoverTimer = null;
+let floatingHoverInside = false;
+let unrestrictedWindowMaximumSize = null;
+let mainWindowSkipsTaskbar = false;
+let windowModeTransitionSequence = 0;
+let windowTransitionChain = Promise.resolve();
+let backgroundPreferenceWriteChain = Promise.resolve();
+let studySettingsWriteChain = Promise.resolve();
+let quitFlushInProgress = false;
+let quitFlushComplete = false;
+let rendererUnresponsiveTimer = null;
+const pendingWindowModeTransitions = new Map();
+let backgroundPreference = readBackgroundPreference(windowPreferencePath);
+let studySettingsState = readStudySettings(studySettingsPath);
 
 const speakerModelFile = '3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx';
+const audioEventModelDirectory = 'audio-tagging-ced-mini';
 const breakPromptSize = Object.freeze({ width: 420, height: 220 });
 const breakPromptMargin = 20;
+const sceneMinimumSize = Object.freeze({ width: 960, height: 540 });
+const floatingWindowSize = Object.freeze({ width: 320, height: 225 });
+const floatingWindowMinimumSize = Object.freeze({ width: 224, height: 170 });
+const floatingWindowMargin = 16;
+const floatingHoverPollIntervalMs = 80;
+const windowModeRenderTimeoutMs = 1000;
+const rendererUnresponsiveRecoveryMs = 10_000;
+
+floatingPreferredSize = readFloatingWindowSize(windowPreferencePath, {
+  defaultSize: floatingWindowSize,
+  minimumSize: floatingWindowMinimumSize,
+  maximumSize: floatingWindowSize,
+});
 
 const contentTypes = new Map([
   ['.html', 'text/html; charset=utf-8'],
@@ -99,7 +207,12 @@ function registerLocalProtocol(targetSession) {
     const root = roots[url.hostname];
     if (!root) return new Response('Not found', { status: 404 });
 
-    const relativePath = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '');
+    let relativePath;
+    try {
+      relativePath = decodeURIComponent(url.pathname).replace(/^[/\\]+/, '');
+    } catch {
+      return new Response('Bad request', { status: 400 });
+    }
     const resolved = path.resolve(root, relativePath);
     const relative = path.relative(root, resolved);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -114,7 +227,6 @@ function registerLocalProtocol(targetSession) {
         headers: {
           'Content-Type': type,
           'Cache-Control': 'no-store',
-          'Access-Control-Allow-Origin': '*',
         },
       });
     } catch {
@@ -156,6 +268,104 @@ function breakPromptBounds() {
   };
 }
 
+function setFloatingBounds(bounds) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setBounds(bounds, false);
+}
+
+function applySceneSizeConstraints() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const [maximumWidth, maximumHeight] = unrestrictedWindowMaximumSize || mainWindow.getMaximumSize();
+  mainWindow.setMaximumSize(maximumWidth, maximumHeight);
+  mainWindow.setMinimumSize(sceneMinimumSize.width, sceneMinimumSize.height);
+}
+
+function applyFloatingSizeConstraints() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setMinimumSize(floatingWindowMinimumSize.width, floatingWindowMinimumSize.height);
+  mainWindow.setMaximumSize(floatingWindowSize.width, floatingWindowSize.height);
+}
+
+function sendFloatingHoverState(hovered, { force = false } = {}) {
+  const next = Boolean(hovered) && mainWindowMode === 'floating';
+  if (!force && floatingHoverInside === next) return;
+  floatingHoverInside = next;
+  const contents = mainWindow?.webContents;
+  if (!contents || contents.isDestroyed() || contents.isLoadingMainFrame()) return;
+  contents.send('floating-hover-changed', { hovered: next });
+}
+
+function sampleFloatingHoverState({ force = false } = {}) {
+  const window = mainWindow;
+  const hovered = Boolean(
+    window
+    && !window.isDestroyed()
+    && mainWindowMode === 'floating'
+    && window.isVisible()
+    && pointInsideBounds(screen.getCursorScreenPoint(), window.getBounds()),
+  );
+  sendFloatingHoverState(hovered, { force });
+}
+
+function stopFloatingHoverTracking() {
+  if (floatingHoverTimer) {
+    clearInterval(floatingHoverTimer);
+    floatingHoverTimer = null;
+  }
+  sendFloatingHoverState(false);
+}
+
+function startFloatingHoverTracking() {
+  if (floatingHoverTimer) clearInterval(floatingHoverTimer);
+  sampleFloatingHoverState({ force: true });
+  floatingHoverTimer = setInterval(sampleFloatingHoverState, floatingHoverPollIntervalMs);
+  floatingHoverTimer.unref?.();
+}
+
+function persistFloatingWindowSize() {
+  if (!floatingPreferredSize) return;
+  const size = { ...floatingPreferredSize };
+  const write = backgroundPreferenceWriteChain
+    .catch(() => {})
+    .then(() => writeFloatingWindowSize(windowPreferencePath, size));
+  backgroundPreferenceWriteChain = write.catch(() => {});
+}
+
+function positionFloatingWindow({ avoidBreakPrompt = false, useSavedPosition = true } = {}) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const display = currentDisplay();
+  const area = display.workArea;
+  const defaultBounds = floatingWindowBounds(area, {
+    size: floatingPreferredSize || floatingWindowSize,
+    margin: floatingWindowMargin,
+  });
+  if (!floatingRestoreBounds) floatingRestoreBounds = { ...defaultBounds };
+  let bounds;
+  if (useSavedPosition && floatingRestoreBounds && !avoidBreakPrompt) {
+    bounds = clampFloatingBounds(
+      floatingRestoreBounds,
+      area,
+      floatingWindowSize,
+      floatingWindowMinimumSize,
+    );
+  } else {
+    const preferredSize = floatingRestoreBounds
+      ? { width: floatingRestoreBounds.width, height: floatingRestoreBounds.height }
+      : (floatingPreferredSize || floatingWindowSize);
+    bounds = floatingWindowBounds(area, {
+      size: preferredSize,
+      margin: floatingWindowMargin,
+      avoidBottomRight: avoidBreakPrompt ? breakPromptBounds() : null,
+    });
+  }
+  setFloatingBounds(bounds);
+}
+
+function restoreFloatingPositionAfterPrompt() {
+  if (mainWindowMode !== 'floating') return;
+  positionFloatingWindow({ avoidBreakPrompt: false, useSavedPosition: true });
+}
+
 function validateBreakPromptPayload(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     throw new Error('休息提示参数无效。');
@@ -191,9 +401,18 @@ function sendBreakPromptState() {
 function presentBreakPrompt() {
   if (!breakPromptWindow || breakPromptWindow.isDestroyed()) return;
   if (breakPromptWindow.webContents.isLoadingMainFrame()) return;
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    breakPromptSuppressedForAlert = true;
+    breakPromptWindow.hide();
+    return;
+  }
+  breakPromptSuppressedForAlert = false;
   breakPromptWindow.setBounds(breakPromptBounds(), false);
   breakPromptWindow.setAlwaysOnTop(true, 'floating');
   breakPromptWindow.showInactive();
+  if (mainWindowMode === 'floating') {
+    positionFloatingWindow({ avoidBreakPrompt: true, useSavedPosition: false });
+  }
 }
 
 function createBreakPromptWindow() {
@@ -209,7 +428,7 @@ function createBreakPromptWindow() {
     fullscreenable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
-    title: '背书自习监督 · 休息券',
+    title: '凛冬督学局 · 休息券',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#160c0b',
@@ -219,6 +438,7 @@ function createBreakPromptWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       backgroundThrottling: false,
       spellcheck: false,
       v8CacheOptions: 'none',
@@ -231,9 +451,7 @@ function createBreakPromptWindow() {
     if (prompt !== breakPromptWindow || prompt.isDestroyed()) return;
     if (!breakPromptState || prompt.webContents.isDestroyed()) return;
     prompt.webContents.send('break-prompt:state', { ...breakPromptState });
-    prompt.setBounds(breakPromptBounds(), false);
-    prompt.setAlwaysOnTop(true, 'floating');
-    prompt.showInactive();
+    presentBreakPrompt();
   });
   prompt.on('close', (event) => {
     if (isQuitting || isDestroyingBreakPrompt) return;
@@ -250,6 +468,7 @@ function createBreakPromptWindow() {
 function destroyBreakPromptWindow() {
   const prompt = breakPromptWindow;
   breakPromptState = null;
+  breakPromptSuppressedForAlert = false;
   if (!prompt || prompt.isDestroyed()) {
     breakPromptWindow = null;
     return;
@@ -268,6 +487,88 @@ function sendWindowMode(mode, extra = {}) {
   mainWindow.webContents.send('window-mode-changed', { mode, ...extra });
 }
 
+function sendSystemInterruption(reason) {
+  const contents = mainWindow?.webContents;
+  if (!contents || contents.isDestroyed() || contents.isLoadingMainFrame()) return;
+  contents.send('system-interruption', { reason });
+}
+
+function requestWindowModeRender(mode, extra = {}) {
+  const window = mainWindow;
+  if (
+    !window
+    || window.isDestroyed()
+    || window.webContents.isDestroyed()
+    || window.webContents.isLoadingMainFrame()
+  ) return Promise.resolve(false);
+
+  const transitionId = ++windowModeTransitionSequence;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      pendingWindowModeTransitions.delete(transitionId);
+      resolve(false);
+    }, windowModeRenderTimeoutMs);
+    pendingWindowModeTransitions.set(transitionId, { mode, resolve, timeout });
+    window.webContents.send('window-mode-changed', { ...extra, mode, transitionId });
+  });
+}
+
+function completeWindowModeTransition(payload) {
+  const { transitionId, mode } = validateWindowModeReadyPayload(payload);
+  const pending = pendingWindowModeTransitions.get(transitionId);
+  if (!pending || pending.mode !== mode) return false;
+  clearTimeout(pending.timeout);
+  pendingWindowModeTransitions.delete(transitionId);
+  pending.resolve(true);
+  return true;
+}
+
+function clearPendingWindowModeTransitions() {
+  for (const pending of pendingWindowModeTransitions.values()) {
+    clearTimeout(pending.timeout);
+    pending.resolve(false);
+  }
+  pendingWindowModeTransitions.clear();
+}
+
+function enqueueWindowTransition(task) {
+  const result = windowTransitionChain.then(task, task);
+  windowTransitionChain = result.catch(() => {});
+  return result;
+}
+
+function setMainWindowSkipTaskbar(value) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setSkipTaskbar(value);
+  mainWindowSkipsTaskbar = Boolean(value);
+}
+
+function failClosedWindowTransition(expectedMode) {
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  stopFloatingHoverTracking();
+  inlineAlertState = null;
+  mainWindowMode = 'hidden';
+  mainWindow.setAlwaysOnTop(false);
+  setMainWindowSkipTaskbar(true);
+  sendWindowMode('hidden');
+  mainWindow.hide();
+  return { renderTimedOut: true, expectedMode, ...runtimeWindowState() };
+}
+
+function suppressBreakPromptForAlert() {
+  if (!breakPromptState || !breakPromptWindow || breakPromptWindow.isDestroyed()) return;
+  breakPromptSuppressedForAlert = true;
+  breakPromptWindow.hide();
+}
+
+function restoreBreakPromptAfterAlert() {
+  if (!breakPromptSuppressedForAlert) return;
+  breakPromptSuppressedForAlert = false;
+  if (breakPromptState && breakPromptWindow && !breakPromptWindow.isDestroyed()) {
+    presentBreakPrompt();
+  }
+}
+
 function sendWindowMaximized() {
   const window = mainWindow;
   if (!window || window.isDestroyed()) return;
@@ -278,19 +579,53 @@ function sendWindowMaximized() {
   });
 }
 
+function recoverMainWindow(window, reason) {
+  if (isQuitting || !window || window !== mainWindow) return;
+  console.error(`[window] renderer recovery: ${reason}`);
+  if (rendererUnresponsiveTimer) {
+    clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = null;
+  }
+  stopFloatingHoverTracking();
+  clearPendingWindowModeTransitions();
+  inlineAlertState = null;
+  breakPromptState = null;
+  breakPromptSuppressedForAlert = false;
+  destroyBreakPromptWindow();
+  mainWindowMode = 'scene';
+  const enrollmentId = speakerService?.getState().enrollmentId;
+  if (enrollmentId) {
+    speakerService.cancelEnrollment({ enrollmentId }).catch((error) => {
+      console.error('[speaker] unable to cancel enrollment during renderer recovery:', error);
+    });
+  }
+
+  const reopen = () => {
+    if (isQuitting || mainWindow) return;
+    createMainWindow();
+  };
+  if (window.isDestroyed()) {
+    mainWindow = null;
+    setTimeout(reopen, 0);
+    return;
+  }
+  window.once('closed', () => setTimeout(reopen, 0));
+  window.destroy();
+}
+
 function createMainWindow() {
   const bounds = fitPresentationBounds(screen.getPrimaryDisplay());
   mainWindow = new BrowserWindow({
     ...bounds,
-    minWidth: 960,
-    minHeight: 540,
+    minWidth: sceneMinimumSize.width,
+    minHeight: sceneMinimumSize.height,
     resizable: true,
     minimizable: true,
     maximizable: true,
     fullscreen: false,
     frame: false,
     show: false,
-    title: '背书自习监督',
+    title: '凛冬督学局',
     icon: path.join(__dirname, 'assets', 'icon.ico'),
     autoHideMenuBar: true,
     backgroundColor: '#120c0b',
@@ -300,14 +635,32 @@ function createMainWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      devTools: !app.isPackaged,
       backgroundThrottling: false,
       spellcheck: false,
       v8CacheOptions: 'none',
     },
   });
+  unrestrictedWindowMaximumSize = mainWindow.getMaximumSize();
+  const createdWindow = mainWindow;
 
   lockWebContentsNavigation(mainWindow.webContents, mainRendererUrl);
   mainWindow.loadURL(mainRendererUrl);
+  createdWindow.webContents.on('render-process-gone', (_event, details) => {
+    recoverMainWindow(createdWindow, details?.reason || 'render-process-gone');
+  });
+  createdWindow.on('unresponsive', () => {
+    if (rendererUnresponsiveTimer) clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = setTimeout(() => {
+      rendererUnresponsiveTimer = null;
+      recoverMainWindow(createdWindow, 'unresponsive');
+    }, rendererUnresponsiveRecoveryMs);
+  });
+  createdWindow.on('responsive', () => {
+    if (!rendererUnresponsiveTimer) return;
+    clearTimeout(rendererUnresponsiveTimer);
+    rendererUnresponsiveTimer = null;
+  });
   mainWindow.once('ready-to-show', () => {
     mainWindowMode = 'scene';
     mainWindow.show();
@@ -315,79 +668,231 @@ function createMainWindow() {
   mainWindow.on('close', (event) => {
     if (isQuitting) return;
     event.preventDefault();
-    hideToBackground();
+    const contents = mainWindow.webContents;
+    if (!contents.isDestroyed() && !contents.isLoadingMainFrame()) {
+      contents.send('window-close-requested');
+    } else {
+      hideToBackground('hidden').catch(() => {});
+    }
   });
   mainWindow.on('maximize', sendWindowMaximized);
   mainWindow.on('unmaximize', sendWindowMaximized);
   mainWindow.on('minimize', () => sendWindowMode(mainWindowMode, { minimized: true }));
+  mainWindow.on('will-move', () => {
+    if (mainWindowMode === 'floating') floatingManualMovePending = true;
+  });
+  mainWindow.on('moved', () => {
+    if (mainWindowMode !== 'floating') {
+      floatingManualMovePending = false;
+      return;
+    }
+    if (!floatingManualMovePending) return;
+    floatingManualMovePending = false;
+    // Read the final native bounds after a manual drag. Intercepting
+    // `will-move` made Windows dragging feel sticky and could reapply a stale
+    // pre-resize width/height. Recording only never changes the user's size.
+    floatingRestoreBounds = { ...mainWindow.getBounds() };
+  });
+  mainWindow.on('resize', () => {
+    if (mainWindowMode !== 'floating') return;
+    const bounds = mainWindow.getBounds();
+    // Native minimum/maximum constraints own the live resize gesture. Recording
+    // the resulting bounds here avoids changing x/y under the pointer, which
+    // previously made left/top-edge resizing feel as if the window stuck to
+    // the screen edge.
+    floatingRestoreBounds = { ...bounds };
+    floatingPreferredSize = {
+      width: bounds.width,
+      height: bounds.height,
+    };
+  });
+  mainWindow.on('resized', () => {
+    if (mainWindowMode === 'floating') persistFloatingWindowSize();
+  });
   mainWindow.on('closed', () => {
+    if (rendererUnresponsiveTimer) {
+      clearTimeout(rendererUnresponsiveTimer);
+      rendererUnresponsiveTimer = null;
+    }
+    stopFloatingHoverTracking();
+    clearPendingWindowModeTransitions();
     mainWindow = null;
+    unrestrictedWindowMaximumSize = null;
+    mainWindowSkipsTaskbar = false;
     destroyBreakPromptWindow();
   });
 }
 
-function showSceneWindow() {
+async function showSceneWindowNow({ force = false } = {}) {
   if (!mainWindow) createMainWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (!force && mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  stopFloatingHoverTracking();
+  if (mainWindowMode === 'scene' && !inlineAlertState) {
+    mainWindow.setAlwaysOnTop(false);
+    setMainWindowSkipTaskbar(false);
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    else if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+    return runtimeWindowState();
+  }
+  const targetDisplay = currentDisplay();
+  mainWindow.hide();
+  inlineAlertState = null;
   mainWindowMode = 'scene';
+  applySceneSizeConstraints();
   mainWindow.setAlwaysOnTop(false);
-  mainWindow.setSkipTaskbar(false);
+  setMainWindowSkipTaskbar(false);
   mainWindow.setResizable(true);
+  mainWindow.setMinimizable(true);
+  mainWindow.setMaximizable(true);
   mainWindow.setFullScreen(false);
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setBounds(fitPresentationBounds(currentDisplay()), true);
-  mainWindow.show();
-  mainWindow.restore();
+  mainWindow.setBounds(fitPresentationBounds(targetDisplay), false);
+  const rendered = await requestWindowModeRender('scene');
+  if (!rendered) return failClosedWindowTransition('scene');
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  else mainWindow.show();
   mainWindow.focus();
-  sendWindowMode('scene');
+  return runtimeWindowState();
 }
 
-function hideToBackground() {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+function showSceneWindow(options = {}) {
+  return enqueueWindowTransition(() => showSceneWindowNow(options));
+}
+
+async function showFloatingWindowNow() {
+  if (!mainWindow) createMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  if (mainWindowMode === 'floating') {
+    applyFloatingSizeConstraints();
+    mainWindow.setAlwaysOnTop(true, 'floating');
+    setMainWindowSkipTaskbar(true);
+    positionFloatingWindow({
+      avoidBreakPrompt: Boolean(breakPromptState && breakPromptWindow?.isVisible()),
+      useSavedPosition: true,
+    });
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.showInactive();
+    mainWindow.blur();
+    startFloatingHoverTracking();
+    return runtimeWindowState();
+  }
+  inlineAlertState = null;
+  mainWindow.hide();
+  mainWindow.setFullScreen(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  // Apply native constraints before switching the bookkeeping mode so any
+  // automatic shrink does not overwrite the user's saved floating position.
+  applyFloatingSizeConstraints();
+  mainWindowMode = 'floating';
+  mainWindow.setResizable(true);
+  mainWindow.setMinimizable(false);
+  mainWindow.setMaximizable(false);
+  setMainWindowSkipTaskbar(true);
+  mainWindow.setAlwaysOnTop(true, 'floating');
+  positionFloatingWindow({
+    avoidBreakPrompt: Boolean(breakPromptState && breakPromptWindow?.isVisible()),
+    useSavedPosition: true,
+  });
+  const rendered = await requestWindowModeRender('floating');
+  if (!rendered) return failClosedWindowTransition('floating');
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.showInactive();
+  mainWindow.blur();
+  startFloatingHoverTracking();
+  return runtimeWindowState();
+}
+
+function showFloatingWindow() {
+  return enqueueWindowTransition(() => showFloatingWindowNow());
+}
+
+async function hideToBackgroundNow(mode = 'hidden') {
+  if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode === 'alert' && inlineAlertState) {
+    return { blockedByAlert: true, ...runtimeWindowState() };
+  }
+  if (mode === 'floating') return showFloatingWindowNow();
+  stopFloatingHoverTracking();
+  if (mainWindowMode === 'hidden') {
+    mainWindow.hide();
+    return runtimeWindowState();
+  }
+  inlineAlertState = null;
   mainWindowMode = 'hidden';
+  mainWindow.setAlwaysOnTop(false);
+  setMainWindowSkipTaskbar(true);
   sendWindowMode('hidden');
   mainWindow.hide();
+  return runtimeWindowState();
+}
+
+function hideToBackground(mode = 'hidden') {
+  return enqueueWindowTransition(() => hideToBackgroundNow(mode));
+}
+
+async function revealForInlineAlertNow() {
+  if (!mainWindow) createMainWindow();
+  if (!mainWindow || mainWindow.isDestroyed()) return { alertId: 0, returnMode: 'scene' };
+  if (mainWindowMode === 'alert' && inlineAlertState) return { ...inlineAlertState };
+  const returnMode = resolveAlertReturnMode(mainWindowMode, mainWindow.isVisible());
+  const targetDisplay = currentDisplay();
+  if (returnMode === 'floating') floatingRestoreBounds = mainWindow.getBounds();
+  stopFloatingHoverTracking();
+  suppressBreakPromptForAlert();
+  inlineAlertState = { alertId: ++inlineAlertSequence, returnMode };
+  mainWindow.hide();
+  mainWindowMode = 'alert';
+  mainWindow.setFullScreen(false);
+  applySceneSizeConstraints();
+  mainWindow.setResizable(true);
+  mainWindow.setMinimizable(false);
+  mainWindow.setMaximizable(false);
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  mainWindow.setBounds(fitPresentationBounds(targetDisplay), false);
+  setMainWindowSkipTaskbar(false);
+  mainWindow.setAlwaysOnTop(true, 'screen-saver');
+  const rendered = await requestWindowModeRender('alert');
+  if (!rendered) {
+    const failed = failClosedWindowTransition('alert');
+    restoreBreakPromptAfterAlert();
+    throw Object.assign(new Error('提醒窗口布局未能及时就绪。'), { windowState: failed });
+  }
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  else mainWindow.show();
+  mainWindow.focus();
+  return { ...inlineAlertState };
 }
 
 function revealForInlineAlert() {
-  if (!mainWindow) createMainWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return { returnToHidden: false };
-  const returnToHidden = mainWindowMode === 'hidden' || !mainWindow.isVisible();
-  mainWindowMode = 'alert';
-  mainWindow.setFullScreen(false);
-  mainWindow.setResizable(true);
-  if (mainWindow.isMaximized()) mainWindow.unmaximize();
-  mainWindow.setBounds(fitPresentationBounds(currentDisplay()), false);
-  mainWindow.setSkipTaskbar(false);
-  mainWindow.setAlwaysOnTop(true, 'screen-saver');
-  mainWindow.show();
-  mainWindow.restore();
-  mainWindow.focus();
-  sendWindowMode('alert');
-  return { returnToHidden };
+  return enqueueWindowTransition(() => revealForInlineAlertNow());
 }
 
-function validateFinishInlineAlertPayload(payload) {
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('提醒结束参数无效。');
+async function finishInlineAlertNow(payload) {
+  const { alertId, disposition } = validateFinishAlertPayload(payload);
+  if (!mainWindow || mainWindow.isDestroyed()) return { ignored: true };
+  if (!inlineAlertState || inlineAlertState.alertId !== alertId || mainWindowMode !== 'alert') {
+    return { ignored: true, ...runtimeWindowState() };
   }
-  const keys = Reflect.ownKeys(payload);
-  if (keys.length !== 1 || keys[0] !== 'returnToHidden'
-    || typeof payload.returnToHidden !== 'boolean') {
-    throw new Error('提醒结束参数字段无效。');
+  const returnMode = disposition === 'scene' ? 'scene' : inlineAlertState.returnMode;
+  inlineAlertState = null;
+  try {
+    if (returnMode === 'floating') return await showFloatingWindowNow();
+    if (returnMode === 'hidden') return await hideToBackgroundNow('hidden');
+    return await showSceneWindowNow({ force: true });
+  } finally {
+    restoreBreakPromptAfterAlert();
   }
-  return { returnToHidden: payload.returnToHidden };
 }
 
 function finishInlineAlert(payload) {
-  const { returnToHidden } = validateFinishInlineAlertPayload(payload);
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (returnToHidden) {
-    mainWindow.setAlwaysOnTop(false);
-    hideToBackground();
-    return;
-  }
-  showSceneWindow();
+  return enqueueWindowTransition(() => finishInlineAlertNow(payload));
 }
 
 function runtimeWindowState() {
@@ -401,6 +906,13 @@ function runtimeWindowState() {
       minimized: false,
       maximized: false,
       minimumSize: { width: 0, height: 0 },
+      bounds: null,
+      alwaysOnTop: false,
+      skipTaskbar: false,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      floatingHovered: false,
     };
   }
   const contents = window.webContents;
@@ -413,6 +925,13 @@ function runtimeWindowState() {
     minimized: window.isMinimized(),
     maximized: window.isMaximized(),
     minimumSize: { width: minimumWidth, height: minimumHeight },
+    bounds: window.getBounds(),
+    alwaysOnTop: window.isAlwaysOnTop(),
+    skipTaskbar: mainWindowSkipsTaskbar,
+    resizable: window.isResizable(),
+    minimizable: window.isMinimizable(),
+    maximizable: window.isMaximizable(),
+    floatingHovered: floatingHoverInside,
   };
 }
 
@@ -426,7 +945,7 @@ function runtimeCacheState() {
 
 function clearTransientSessionData() {
   try {
-    fsSync.rmSync(transientSessionDataRoot, { recursive: true, force: true });
+    removeTransientPathNoFollow(transientSessionDataRoot);
     fsSync.rmdirSync(transientSessionParent);
   } catch (error) {
     if (error?.code !== 'ENOTEMPTY' && error?.code !== 'ENOENT') {
@@ -453,27 +972,42 @@ function scheduleTransientSessionDataCleanup() {
   }
 }
 
-function minimizeMainWindow() {
+function minimizeMainWindowNow() {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode !== 'scene' || inlineAlertState) {
+    return { blockedByMode: true, ...runtimeWindowState() };
+  }
   mainWindow.minimize();
   return runtimeWindowState();
 }
 
-function toggleMainWindowMaximized() {
+function minimizeMainWindow() {
+  return enqueueWindowTransition(() => minimizeMainWindowNow());
+}
+
+function toggleMainWindowMaximizedNow() {
   if (!mainWindow || mainWindow.isDestroyed()) return runtimeWindowState();
+  if (mainWindowMode !== 'scene' || inlineAlertState) {
+    return { blockedByMode: true, ...runtimeWindowState() };
+  }
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
   else mainWindow.maximize();
   return runtimeWindowState();
+}
+
+function toggleMainWindowMaximized() {
+  return enqueueWindowTransition(() => toggleMainWindowMaximizedNow());
 }
 
 function createTray() {
   const iconPath = path.join(__dirname, 'assets', 'icon.ico');
   const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   tray = new Tray(icon);
-  tray.setToolTip('背书自习监督');
+  tray.setToolTip('凛冬督学局');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开督学场景', click: showSceneWindow },
-    { label: '隐藏到后台', click: hideToBackground },
+    { label: '显示漂浮窗', click: () => hideToBackground('floating') },
+    { label: '完全隐藏', click: () => hideToBackground('hidden') },
     { type: 'separator' },
     { label: '退出程序', click: quitApp },
   ]));
@@ -538,13 +1072,35 @@ function registerSpeakerIpc() {
     }
   };
 
-  ipcMain.handle('speaker:get-state', trustedHandler(() => speakerService.getState()));
+  ipcMain.handle('speaker:get-state', trustedHandler(async () => {
+    await speakerService.initialize();
+    return speakerService.getState();
+  }));
   ipcMain.handle('speaker:begin-enrollment', trustedHandler((payload) => speakerService.beginEnrollment(payload)));
   ipcMain.handle('speaker:add-enrollment-sample', trustedHandler((payload) => speakerService.addEnrollmentSample(payload)));
-  ipcMain.handle('speaker:finish-enrollment', trustedHandler(() => speakerService.finishEnrollment()));
-  ipcMain.handle('speaker:cancel-enrollment', trustedHandler(() => speakerService.cancelEnrollment()));
+  ipcMain.handle('speaker:finish-enrollment', trustedHandler((payload) => speakerService.finishEnrollment(payload)));
+  ipcMain.handle('speaker:cancel-enrollment', trustedHandler((payload) => speakerService.cancelEnrollment(payload)));
   ipcMain.handle('speaker:verify', trustedHandler((payload) => speakerService.verify(payload)));
   ipcMain.handle('speaker:delete-profile', trustedHandler((payload) => speakerService.deleteProfile(payload?.profileId)));
+  ipcMain.handle('speaker:delete-profile-artifact', trustedHandler(() => speakerService.deleteProfileArtifact()));
+}
+
+function registerAudioEventIpc() {
+  const trustedHandler = (handler) => async (event, payload) => {
+    if (!isTrustedRenderer(event)) throw new Error('拒绝非本应用页面访问声音分类服务。');
+    try {
+      return await handler(payload);
+    } catch (error) {
+      console.error('[audio-event]', error);
+      throw new Error(error?.publicMessage || error?.message || '声音分类失败。');
+    }
+  };
+
+  ipcMain.handle('audio-event:get-state', trustedHandler(async () => {
+    await audioEventService.initialize();
+    return audioEventService.getState();
+  }));
+  ipcMain.handle('audio-event:classify', trustedHandler((payload) => audioEventService.classify(payload)));
 }
 
 function registerBreakPromptIpc() {
@@ -563,7 +1119,9 @@ function registerBreakPromptIpc() {
   }));
   ipcMain.handle('break-prompt:hide', trustedRendererHandler(() => {
     breakPromptState = null;
+    breakPromptSuppressedForAlert = false;
     if (breakPromptWindow && !breakPromptWindow.isDestroyed()) breakPromptWindow.hide();
+    restoreFloatingPositionAfterPrompt();
     return { hidden: true };
   }));
   ipcMain.on('break-prompt:action', (event, action) => {
@@ -580,15 +1138,22 @@ function registerBreakPromptIpc() {
   });
 }
 
-app.whenReady().then(async () => {
+app.on('second-instance', () => {
+  if (!hasSingleInstanceLock || !app.isReady() || !mainWindow || mainWindow.isDestroyed()) return;
+  showSceneWindow().catch((error) => {
+    console.error('[window] unable to restore the existing instance:', error);
+  });
+});
+
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   runtimeSession = session.fromPartition(runtimeSessionPartition, { cache: false });
   registerLocalProtocol(runtimeSession);
   runtimeSession.setPermissionCheckHandler((webContents, permission, requestingOrigin, details) => (
     permission === 'media'
     && details?.mediaType === 'audio'
-      && webContents?.getURL() === mainRendererUrl
+    && webContents?.getURL() === mainRendererUrl
     && typeof requestingOrigin === 'string'
-    && requestingOrigin.startsWith('rwt://renderer')
+    && requestingOrigin === 'rwt://renderer'
   ));
   runtimeSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
@@ -599,17 +1164,77 @@ app.whenReady().then(async () => {
       && mediaTypes.every((type) => type === 'audio'),
     );
   });
+  powerMonitor.on('suspend', () => sendSystemInterruption('suspend'));
+  powerMonitor.on('resume', () => sendSystemInterruption('resume'));
+  powerMonitor.on('lock-screen', () => sendSystemInterruption('lock-screen'));
+  powerMonitor.on('unlock-screen', () => sendSystemInterruption('unlock-screen'));
 
-  ipcMain.handle('hide-to-background', trustedRendererHandler(() => hideToBackground()));
+  ipcMain.handle('background-preference:get', trustedRendererHandler(() => ({
+    backgroundMode: backgroundPreference,
+  })));
+  ipcMain.handle('background-preference:set', trustedRendererHandler((_event, payload) => {
+    const { mode } = validateBackgroundModePayload(payload);
+    const write = backgroundPreferenceWriteChain
+      .catch(() => {})
+      .then(async () => {
+        const saved = await writeBackgroundPreference(windowPreferencePath, mode);
+        backgroundPreference = saved.backgroundMode;
+        return { backgroundMode: backgroundPreference };
+      });
+    backgroundPreferenceWriteChain = write.catch(() => {});
+    return write;
+  }));
+  ipcMain.handle('study-settings:get', trustedRendererHandler(() => ({
+    exists: studySettingsState.exists,
+    settings: { ...studySettingsState.settings },
+  })));
+  ipcMain.handle('study-settings:set', trustedRendererHandler((_event, payload) => {
+    const settings = validateStudySettingsPayload(payload);
+    const write = studySettingsWriteChain
+      .catch(() => {})
+      .then(async () => {
+        const saved = await writeStudySettings(studySettingsPath, settings);
+        studySettingsState = { exists: true, settings: saved };
+        return { ...saved };
+      });
+    studySettingsWriteChain = write.catch(() => {});
+    return write;
+  }));
+  ipcMain.handle('hide-to-background', trustedRendererHandler((_event, payload) => {
+    const { mode } = validateBackgroundModePayload(payload);
+    return hideToBackground(mode);
+  }));
   ipcMain.handle('window:minimize', trustedRendererHandler(() => minimizeMainWindow()));
   ipcMain.handle('window:toggle-maximize', trustedRendererHandler(() => toggleMainWindowMaximized()));
   ipcMain.handle('restore-scene-mode', trustedRendererHandler(() => showSceneWindow()));
+  ipcMain.handle('force-restore-scene-mode', trustedRendererHandler(() => showSceneWindow({ force: true })));
   ipcMain.handle('reveal-for-inline-alert', trustedRendererHandler(() => revealForInlineAlert()));
   ipcMain.handle('finish-inline-alert', trustedRendererHandler((_event, payload) => finishInlineAlert(payload)));
   ipcMain.handle('get-animation-canvas', trustedRendererHandler(() => ({ ...presentationCanvas, windowMode: mainWindowMode })));
   ipcMain.handle('get-runtime-window-state', trustedRendererHandler(() => runtimeWindowState()));
   ipcMain.handle('get-runtime-cache-state', trustedRendererHandler(() => runtimeCacheState()));
   ipcMain.handle('quit-app', trustedRendererHandler(() => quitApp()));
+  ipcMain.on('test-hooks-enabled', (event) => {
+    const contents = mainWindow?.webContents;
+    event.returnValue = Boolean(
+      testHooksEnabled
+      && contents
+      && !contents.isDestroyed()
+      && event.sender === contents
+      && event.senderFrame === contents.mainFrame,
+    );
+  });
+  ipcMain.on('window-mode-ready', (event, payload) => {
+    if (!isTrustedRenderer(event)) {
+      console.warn('[window] rejected mode acknowledgement from untrusted renderer');
+      return;
+    }
+    try {
+      completeWindowModeTransition(payload);
+    } catch (error) {
+      console.warn('[window] rejected invalid mode acknowledgement:', error?.message || error);
+    }
+  });
   registerBreakPromptIpc();
 
   speakerService = new SpeakerService({
@@ -619,17 +1244,45 @@ app.whenReady().then(async () => {
     profileCrypto: createProfileCrypto(),
   });
   registerSpeakerIpc();
-  const speakerState = await speakerService.initialize();
-  if (!speakerState.ready) console.error('[speaker] initialization failed:', speakerState.error);
-
+  audioEventService = new AudioEventService({
+    workerPath: unpackedResourcePath('audio-event-worker.js'),
+    modelPath: unpackedResourcePath('models', audioEventModelDirectory, 'model.int8.onnx'),
+    labelsPath: unpackedResourcePath('models', audioEventModelDirectory, 'class_labels_indices.csv'),
+  });
+  registerAudioEventIpc();
+  const serviceInitialization = Promise.all([
+    speakerService.initialize(),
+    audioEventService.initialize(),
+  ]);
   createMainWindow();
   createTray();
+  const [speakerState, audioEventState] = await serviceInitialization;
+  if (!speakerState.ready) console.error('[speaker] initialization failed:', speakerState.error);
+  if (!audioEventState.ready) console.error('[audio-event] initialization failed:', audioEventState.error);
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
+  if (!quitFlushComplete) {
+    event.preventDefault();
+    if (quitFlushInProgress) return;
+    quitFlushInProgress = true;
+    const flush = Promise.allSettled([
+      backgroundPreferenceWriteChain,
+      studySettingsWriteChain,
+      windowTransitionChain,
+    ]);
+    const timeout = new Promise((resolve) => setTimeout(resolve, 2_500));
+    Promise.race([flush, timeout]).finally(() => {
+      quitFlushComplete = true;
+      app.quit();
+    });
+    return;
+  }
   isQuitting = true;
+  stopFloatingHoverTracking();
   destroyBreakPromptWindow();
   speakerService?.dispose().catch(() => {});
+  audioEventService?.dispose().catch(() => {});
 });
 app.on('will-quit', clearTransientSessionData);
 app.on('will-quit', scheduleTransientSessionDataCleanup);

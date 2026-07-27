@@ -4,23 +4,27 @@ const UI = {
   startButton: document.querySelector('#start-button'),
   stopButton: document.querySelector('#stop-button'),
   breakButton: document.querySelector('#break-button'),
+  backgroundAction: document.querySelector('#background-action'),
   backgroundButton: document.querySelector('#background-button'),
+  backgroundActionMenu: document.querySelector('#background-action-menu'),
+  backgroundChoiceHidden: document.querySelector('#background-choice-hidden'),
+  backgroundChoiceFloating: document.querySelector('#background-choice-floating'),
   controlsButton: document.querySelector('#controls-button'),
   exitButton: document.querySelector('#exit-button'),
   windowTitlebar: document.querySelector('#window-titlebar'),
   windowMinimizeButton: document.querySelector('#window-minimize-button'),
   windowMaximizeButton: document.querySelector('#window-maximize-button'),
   windowCloseButton: document.querySelector('#window-close-button'),
+  floatingVoiceState: document.querySelector('#floating-voice-state'),
+  floatingTimer: document.querySelector('#floating-timer'),
+  floatingHideButton: document.querySelector('#floating-hide-button'),
+  floatingExpandButton: document.querySelector('#floating-expand-button'),
   timer: document.querySelector('#timer'),
   sessionState: document.querySelector('#session-state'),
   voiceState: document.querySelector('#voice-state'),
   voiceStatus: document.querySelector('#voice-status'),
   volumeBar: document.querySelector('#volume-bar'),
   meter: document.querySelector('.meter-wrap .meter'),
-  thresholdMarker: document.querySelector('#volume-threshold'),
-  voiceThreshold: document.querySelector('#voice-threshold-input'),
-  voiceThresholdValue: document.querySelector('#voice-threshold-value'),
-  voiceThresholdLabel: document.querySelector('#voice-threshold-label'),
   microphoneSelect: document.querySelector('#microphone-select'),
   refreshMicrophonesButton: document.querySelector('#refresh-microphones-button'),
   microphoneStatus: document.querySelector('#microphone-status'),
@@ -30,6 +34,8 @@ const UI = {
   silenceLimitValue: document.querySelector('#silence-limit-value'),
   studyVoiceLimit: document.querySelector('#study-voice-limit-input'),
   studyVoiceLimitValue: document.querySelector('#study-voice-limit-value'),
+  backgroundModeHidden: document.querySelector('#background-mode-hidden'),
+  backgroundModeFloating: document.querySelector('#background-mode-floating'),
   reciteModeButton: document.querySelector('#recite-mode-button'),
   studyModeButton: document.querySelector('#study-mode-button'),
   modeTitle: document.querySelector('#mode-title'),
@@ -40,13 +46,11 @@ const UI = {
   liveVoiceDuration: document.querySelector('#live-voice-duration'),
   liveVolumeBar: document.querySelector('#live-volume-bar'),
   liveMeter: document.querySelector('#live-meter'),
-  liveThresholdMarker: document.querySelector('#live-volume-threshold'),
   eventLog: document.querySelector('#event-log'),
   alertCount: document.querySelector('#alert-count'),
   mediaCount: document.querySelector('#media-count'),
   clipSelect: document.querySelector('#clip-select'),
   previewClipButton: document.querySelector('#preview-clip-button'),
-  recalibrateButton: document.querySelector('#recalibrate-button'),
   speakerProfileState: document.querySelector('#speaker-profile-state'),
   speakerProfileSelect: document.querySelector('#speaker-profile-select'),
   speakerEnrollButton: document.querySelector('#speaker-enroll-button'),
@@ -70,20 +74,34 @@ const UI = {
 const RULES = DisciplineSceneRules;
 const POLICY = StudyPolicy;
 const MEDIA_CATALOG_URL = 'rwt://renderer/media/catalog.json';
-const SETTINGS_STORAGE_KEY = 'red-watch-study-settings-v1';
+const LEGACY_SETTINGS_STORAGE_KEY = 'red-watch-study-settings-v1';
 const MICROPHONE_POLL_MS = 100;
+const MICROPHONE_PCM_TIMEOUT_MS = 5_000;
+const MICROPHONE_DIGITAL_SILENCE_TIMEOUT_MS = 10_000;
 const CALIBRATION_SECONDS = 3;
+const SPEAKER_QUICK_WINDOW_SECONDS = 2;
+const SPEAKER_QUICK_CONFIRM_THRESHOLD = 0.74;
 const SPEAKER_WINDOW_SECONDS = 2.4;
 const SPEAKER_OVERLAP_SECONDS = 0.6;
 const SPEAKER_VERIFY_INTERVAL_MS = 1_200;
 const SPEAKER_CONFIRM_HOLD_MS = 2_500;
 const SPEAKER_DEADLINE_GRACE_MS = 3_000;
+const SPEAKER_VERIFY_TIMEOUT_MS = 5_000;
+const QUIT_SETTINGS_FLUSH_TIMEOUT_MS = 2_500;
+const STUDY_EVENT_WINDOW_SECONDS = 2;
+const STUDY_EVENT_INTERVAL_MS = 1_000;
+const STUDY_EVENT_MAX_QUEUED_WINDOWS = 2;
+const STUDY_RECOVERY_CONFIRM_SECONDS = 5;
+const STUDY_EVENT_OVERLAP_SECONDS = Math.max(
+  0,
+  STUDY_EVENT_WINDOW_SECONDS - (STUDY_EVENT_INTERVAL_MS / 1_000),
+);
 const ENROLLMENT_DURATION_SECONDS = 24;
 const ENROLLMENT_SAMPLE_COUNT = 8;
 const ENROLLMENT_WINDOW_SECONDS = 2.4;
 const METER_MIN_DB = -100;
-const METER_MAX_DB = 0;
-const DEFAULT_NOISE_FLOOR_DB = -50;
+const RECITE_AUTO_VOICE_MARGIN_DB = 8;
+const monotonicNow = () => performance.now();
 
 const state = {
   active: false,
@@ -97,7 +115,8 @@ const state = {
   stopRequested: false,
   finalizingStop: false,
   sessionFailureCleanupPending: false,
-  studyClock: new POLICY.EffectiveStudyClock(),
+  systemInterruptionPending: false,
+  studyClock: new POLICY.EffectiveStudyClock({ now: monotonicNow }),
   milestoneLedger: new POLICY.MilestoneLedger('recite'),
   earnedPraiseMarks: 0,
   praisedMark: 0,
@@ -113,6 +132,10 @@ const state = {
   nextPatrolAt: 0,
   audioStream: null,
   microphoneGeneration: 0,
+  microphoneHealthTimer: null,
+  microphoneHealthFailurePending: false,
+  lastPcmAt: 0,
+  lastNonZeroPcmAt: 0,
   preflightTesting: false,
   preflightStarting: false,
   preflightStopping: false,
@@ -125,19 +148,22 @@ const state = {
   samples: null,
   frequencySamples: null,
   previousSpectrum: null,
-  latestNoiseFloorDb: DEFAULT_NOISE_FLOOR_DB,
   pcmCapture: null,
   vad: null,
   calibrating: false,
   latestVadSpeech: false,
   speakerReady: false,
+  audioEventReady: false,
+  audioEventError: '',
   speakerProfileExists: false,
+  speakerProfileArtifactExists: false,
   speakerProfileCreatedAt: '',
   speakerProfiles: [],
   speakerModelError: '',
   speakerProfileError: '',
   speakerChunks: [],
   speakerSampleCount: 0,
+  speakerQuickProbeCompleted: false,
   speakerVerificationPending: false,
   speakerVerificationGeneration: 0,
   lastSpeakerVerificationAt: 0,
@@ -148,12 +174,25 @@ const state = {
   lastSpeakerScore: 0,
   speakerMatchHistory: [],
   lastSpeechChunkAt: 0,
+  studyAudioChunks: [],
+  studyAudioSampleCount: 0,
+  studyAudioClassificationPending: false,
+  studyAudioClassificationQueue: [],
+  studyAudioClassificationRequestSequence: 0,
+  studyAudioClassificationInFlightId: 0,
+  studyAudioClassificationGeneration: 0,
+  lastStudyAudioClassificationAt: 0,
+  latestStudyAudioDecision: null,
+  microphoneProcessingWarning: '',
   ownerCandidateAt: 0,
   ownerConfirmedUntil: 0,
   speakerGraceDeadline: 0,
   enrollmentOpen: false,
   enrollmentPending: false,
   enrollmentBusy: false,
+  enrollmentId: null,
+  enrollmentGeneration: 0,
+  enrollmentCaptureCancel: null,
   silenceArmed: false,
   silentSince: 0,
   silencePausedAt: 0,
@@ -164,9 +203,9 @@ const state = {
   settings: {
     reciteSilenceSeconds: POLICY.MODE_RULES.recite.violationSeconds.default,
     studyVoiceSeconds: POLICY.MODE_RULES.study.violationSeconds.default,
-    reciteSensitivityDb: 8,
-    studySensitivityDb: POLICY.QUIET_SENSITIVITY_DB.default,
     microphoneDeviceId: '',
+    microphoneDeviceLabel: '',
+    backgroundMode: 'hidden',
   },
   microphoneDevices: [],
   microphoneRefreshPending: false,
@@ -194,39 +233,53 @@ function modeRules() {
   return POLICY.getModeRules(state.mode);
 }
 
-function loadSettings() {
-  try {
-    const stored = JSON.parse(localStorage.getItem(SETTINGS_STORAGE_KEY) || '{}');
-    if (stored.mode === 'recite' || stored.mode === 'study') state.mode = stored.mode;
-    state.settings.reciteSilenceSeconds = POLICY.normalizeViolationSeconds(
-      'recite',
-      stored.reciteSilenceSeconds,
-    );
-    state.settings.studyVoiceSeconds = POLICY.normalizeViolationSeconds(
-      'study',
-      stored.studyVoiceSeconds,
-    );
-    state.settings.reciteSensitivityDb = clamp(
-      Math.round(Number(stored.reciteSensitivityDb) || 8),
-      4,
-      18,
-    );
-    state.settings.studySensitivityDb = POLICY.normalizeQuietSensitivityDb(
-      stored.studySensitivityDb,
-    );
-    state.settings.microphoneDeviceId = typeof stored.microphoneDeviceId === 'string'
-      ? stored.microphoneDeviceId.slice(0, 512)
-      : '';
-  } catch {
-    // Invalid local preferences fall back to the safe defaults above.
-  }
+function studySettingsPayload(source = {}) {
+  return {
+    mode: source.mode === 'study' ? 'study' : 'recite',
+    reciteSilenceSeconds: POLICY.normalizeViolationSeconds('recite', source.reciteSilenceSeconds),
+    studyVoiceSeconds: POLICY.normalizeViolationSeconds('study', source.studyVoiceSeconds),
+    microphoneDeviceId: typeof source.microphoneDeviceId === 'string'
+      ? source.microphoneDeviceId.slice(0, 512)
+      : '',
+    microphoneDeviceLabel: typeof source.microphoneDeviceLabel === 'string'
+      ? source.microphoneDeviceLabel.slice(0, 160)
+      : '',
+  };
 }
 
+async function loadSettings() {
+  const durable = await window.desktopAPI.getStudySettings();
+  let settings = durable?.settings || {};
+  if (!durable?.exists) {
+    let legacy = {};
+    try {
+      legacy = JSON.parse(localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY) || '{}');
+    } catch {
+      // Invalid legacy browser storage is replaced by safe defaults below.
+    }
+    settings = studySettingsPayload(legacy);
+    await window.desktopAPI.setStudySettings(settings);
+  }
+  localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY);
+  const normalized = studySettingsPayload(settings);
+  state.mode = normalized.mode;
+  state.settings.reciteSilenceSeconds = normalized.reciteSilenceSeconds;
+  state.settings.studyVoiceSeconds = normalized.studyVoiceSeconds;
+  state.settings.microphoneDeviceId = normalized.microphoneDeviceId;
+  state.settings.microphoneDeviceLabel = normalized.microphoneDeviceLabel;
+}
+
+let studySettingsSaveChain = Promise.resolve();
+
 function saveSettings() {
-  localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
-    mode: state.mode,
-    ...state.settings,
-  }));
+  const payload = studySettingsPayload({ mode: state.mode, ...state.settings });
+  const previous = studySettingsSaveChain;
+  const write = window.desktopAPI.setStudySettings(payload);
+  write.catch((error) => {
+    console.error('[settings] 保存学习设置失败：', error);
+  });
+  studySettingsSaveChain = Promise.allSettled([previous, write]).then(() => {});
+  return write;
 }
 
 function microphoneSelectionLocked() {
@@ -246,15 +299,18 @@ function selectedMicrophone() {
 
 function selectedMicrophoneProfileLabel() {
   const selected = selectedMicrophone();
-  const current = selected?.label || (state.settings.microphoneDeviceId ? '已选麦克风' : '系统默认麦克风');
+  const current = selected?.label
+    || state.settings.microphoneDeviceLabel
+    || (state.settings.microphoneDeviceId ? '已选麦克风' : '系统默认麦克风');
   return current.slice(0, 80);
 }
 
-function microphoneConstraints() {
+function microphoneConstraints({ rawStudyAudio = state.mode === 'study' } = {}) {
   const audio = {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true,
+    echoCancellation: !rawStudyAudio,
+    noiseSuppression: !rawStudyAudio,
+    autoGainControl: !rawStudyAudio,
+    channelCount: 1,
   };
   if (state.settings.microphoneDeviceId) {
     audio.deviceId = { exact: state.settings.microphoneDeviceId };
@@ -279,7 +335,10 @@ function renderMicrophoneUi() {
   if (!selectedPresent) {
     const missing = document.createElement('option');
     missing.value = selectedId;
-    missing.textContent = '已选麦克风不可用，请重新选择';
+    const savedLabel = state.settings.microphoneDeviceLabel;
+    missing.textContent = savedLabel
+      ? `${savedLabel}（当前不可用）`
+      : '已选麦克风不可用，请重新选择';
     UI.microphoneSelect.append(missing);
   }
   UI.microphoneSelect.value = selectedId;
@@ -287,7 +346,10 @@ function renderMicrophoneUi() {
   UI.refreshMicrophonesButton.disabled = microphoneSelectionLocked() || state.microphoneRefreshPending;
   const selected = selectedMicrophone();
   if (selectedId && !selectedPresent) {
-    UI.microphoneStatus.textContent = '已选麦克风不可用，请刷新后重新选择。';
+    const savedLabel = state.settings.microphoneDeviceLabel;
+    UI.microphoneStatus.textContent = savedLabel
+      ? `已选麦克风“${savedLabel}”当前不可用，请连接后刷新或重新选择。`
+      : '已选麦克风当前不可用，请连接后刷新或重新选择。';
   } else if (selected) {
     UI.microphoneStatus.textContent = `当前：${selected.label || '已选麦克风'}。用于测试、学习和声纹录入。`;
   } else {
@@ -305,6 +367,11 @@ async function refreshMicrophones({ requestPermission = false } = {}) {
     if (requestPermission) permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     const devices = await navigator.mediaDevices.enumerateDevices();
     state.microphoneDevices = devices.filter((device) => device.kind === 'audioinput');
+    const selected = selectedMicrophone();
+    if (selected?.label && selected.label !== state.settings.microphoneDeviceLabel) {
+      state.settings.microphoneDeviceLabel = selected.label.slice(0, 160);
+      saveSettings();
+    }
   } finally {
     permissionStream?.getTracks().forEach((track) => track.stop());
     state.microphoneRefreshPending = false;
@@ -322,63 +389,25 @@ function violationLimitMs() {
   return violationLimitSeconds() * 1_000;
 }
 
-function voiceThreshold() {
-  return Number(UI.voiceThreshold.value);
+function rejectedSpeakerStatus(now = monotonicNow()) {
+  const seconds = state.silentSince
+    ? Math.max(0, Math.floor((now - state.silentSince) / 1_000))
+    : 0;
+  return `暂未确认本人声音 ${seconds} 秒`;
 }
 
-function thresholdRange() {
-  const minimum = Number(UI.voiceThreshold.min);
-  const maximum = Number(UI.voiceThreshold.max);
-  const step = Number(UI.voiceThreshold.step) || 1;
-  return {
-    minimum: Number.isFinite(minimum) ? minimum : 0,
-    maximum: Number.isFinite(maximum) ? maximum : 100,
-    step: step > 0 ? step : 1,
-  };
-}
-
-function normalizeThreshold(value) {
-  const { minimum, maximum, step } = thresholdRange();
-  const numeric = Number(value);
-  const bounded = clamp(Number.isFinite(numeric) ? numeric : minimum, minimum, maximum);
-  const precision = (String(step).split('.')[1] || '').length;
-  return Number((minimum + Math.round((bounded - minimum) / step) * step).toFixed(precision));
-}
-
-function thresholdMarkerPercent() {
-  const noiseFloorDb = Number.isFinite(state.latestNoiseFloorDb)
-    ? state.latestNoiseFloorDb
-    : DEFAULT_NOISE_FLOOR_DB;
-  const absoluteThresholdDb = clamp(noiseFloorDb + voiceThreshold(), METER_MIN_DB, METER_MAX_DB);
-  return ((absoluteThresholdDb - METER_MIN_DB) / (METER_MAX_DB - METER_MIN_DB)) * 100;
-}
-
-function renderThresholdMarkers() {
-  const { minimum, maximum } = thresholdRange();
-  const value = normalizeThreshold(voiceThreshold());
-  const position = thresholdMarkerPercent();
-  const settingName = state.mode === 'study' ? '出声门槛' : '抗噪幅度';
-  const valueText = `底噪 + ${value} dB`;
-  [UI.thresholdMarker, UI.liveThresholdMarker].forEach((marker, index) => {
-    marker.style.left = `${position}%`;
-    marker.setAttribute('aria-valuemin', String(minimum));
-    marker.setAttribute('aria-valuemax', String(maximum));
-    marker.setAttribute('aria-valuenow', String(value));
-    marker.setAttribute('aria-valuetext', valueText);
-    marker.setAttribute('aria-label', `${index ? '粗调' : '调整'}${settingName}`);
-    marker.title = `${settingName}：${valueText}；拖动或使用方向键调整`;
-  });
-}
-
-function resetPreflightDetectionAfterSettingChange() {
-  if (!isPreflightAudioActive()) return;
+function resetDetectionAfterSettingChange() {
+  const preflight = isPreflightAudioActive();
+  if (!preflight) return;
   state.preflightThresholdReached = false;
   state.latestQuietResult = null;
   document.body.dataset.voiceDetected = 'false';
   if (state.mode === 'study') {
     state.quietDetector?.reset();
+    resetStudyAudioRuntime();
   } else {
-    state.silentSince = state.calibrating ? 0 : Date.now();
+    resetSpeakerRuntime();
+    state.silentSince = state.calibrating ? 0 : monotonicNow();
     state.silenceArmed = !state.calibrating;
   }
   if (state.calibrating) {
@@ -390,88 +419,82 @@ function resetPreflightDetectionAfterSettingChange() {
   updatePreflightUi('设置已更新，请继续测试。');
 }
 
-function updateThreshold({ persist = true } = {}) {
-  const previousThreshold = state.mode === 'recite'
-    ? state.settings.reciteSensitivityDb
-    : state.settings.studySensitivityDb;
-  const threshold = normalizeThreshold(voiceThreshold());
-  UI.voiceThreshold.value = String(threshold);
-  if (state.mode === 'recite') state.settings.reciteSensitivityDb = threshold;
-  else state.settings.studySensitivityDb = POLICY.normalizeQuietSensitivityDb(threshold);
-  const currentThreshold = state.mode === 'recite'
-    ? state.settings.reciteSensitivityDb
-    : state.settings.studySensitivityDb;
-  UI.voiceThreshold.value = String(currentThreshold);
-  UI.voiceThresholdValue.textContent = `底噪 + ${currentThreshold} dB`;
-  state.vad?.setSensitivity(currentThreshold);
-  state.quietDetector?.setSensitivityDb(currentThreshold);
-  renderThresholdMarkers();
-  if (currentThreshold !== previousThreshold) resetPreflightDetectionAfterSettingChange();
-  if (persist) saveSettings();
-}
-
-function setThresholdFromMarker(value) {
-  UI.voiceThreshold.value = String(normalizeThreshold(value));
-  updateThreshold();
-}
-
-function thresholdFromClientX(meter, clientX) {
-  const rect = meter.getBoundingClientRect();
-  if (!(rect.width > 0)) return voiceThreshold();
-  const ratio = clamp((clientX - rect.left) / rect.width, 0, 1);
-  const absoluteThresholdDb = METER_MIN_DB + ratio * (METER_MAX_DB - METER_MIN_DB);
-  const noiseFloorDb = Number.isFinite(state.latestNoiseFloorDb)
-    ? state.latestNoiseFloorDb
-    : DEFAULT_NOISE_FLOOR_DB;
-  return normalizeThreshold(absoluteThresholdDb - noiseFloorDb);
-}
-
-function bindThresholdMarker(marker, meter) {
-  let activePointerId = null;
-  const applyPointer = (event) => {
-    if (activePointerId === null || event.pointerId !== activePointerId) return;
-    setThresholdFromMarker(thresholdFromClientX(meter, event.clientX));
-    event.preventDefault();
-  };
-  const finishPointer = (event) => {
-    if (activePointerId === null || event.pointerId !== activePointerId) return;
-    try {
-      if (marker.hasPointerCapture?.(activePointerId)) marker.releasePointerCapture(activePointerId);
-    } catch {}
-    activePointerId = null;
-    event.preventDefault();
-  };
-  marker.addEventListener('pointerdown', (event) => {
-    if (event.pointerType === 'mouse' && event.button !== 0) return;
-    activePointerId = event.pointerId;
-    try {
-      marker.setPointerCapture?.(activePointerId);
-    } catch {}
-    applyPointer(event);
-  });
-  window.addEventListener('pointermove', applyPointer);
-  window.addEventListener('pointerup', finishPointer);
-  window.addEventListener('pointercancel', finishPointer);
-  marker.addEventListener('keydown', (event) => {
-    const { minimum, maximum, step } = thresholdRange();
-    let nextValue = voiceThreshold();
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') nextValue -= step;
-    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') nextValue += step;
-    else if (event.key === 'Home') nextValue = minimum;
-    else if (event.key === 'End') nextValue = maximum;
-    else return;
-    event.preventDefault();
-    setThresholdFromMarker(nextValue);
-  });
+function animationWatchPresentationActive() {
+  return state.active
+    && state.eventBusy
+    && state.sessionPhase === 'studying'
+    && !state.alertOpen;
 }
 
 function setChip(element, text, kind = '') {
+  if (element === UI.voiceState && kind !== 'watch' && animationWatchPresentationActive()) {
+    text = '好好学！盯着你呢！';
+    kind = 'watch';
+  }
   element.textContent = text;
   element.className = `chip ${kind}`.trim();
   if (element === UI.voiceState) {
+    const watchPresentation = kind === 'watch';
     UI.liveVoiceState.textContent = text;
     UI.liveVoiceState.className = `chip ${kind}`.trim();
     UI.liveVoiceDuration.textContent = text;
+    UI.liveVoiceDuration.classList.toggle('watch-copy', watchPresentation);
+    UI.floatingVoiceState.textContent = text;
+    UI.floatingVoiceState.className = `floating-voice-state ${kind}`.trim();
+    UI.voiceStatus.classList.toggle('watch-copy', watchPresentation);
+  }
+}
+
+function updateBackgroundModeUi() {
+  const floating = state.settings.backgroundMode === 'floating';
+  UI.backgroundModeHidden.classList.toggle('active', !floating);
+  UI.backgroundModeFloating.classList.toggle('active', floating);
+  UI.backgroundModeHidden.setAttribute('aria-pressed', String(!floating));
+  UI.backgroundModeFloating.setAttribute('aria-pressed', String(floating));
+  UI.backgroundChoiceHidden.classList.toggle('active', !floating);
+  UI.backgroundChoiceFloating.classList.toggle('active', floating);
+  UI.backgroundChoiceHidden.setAttribute('aria-pressed', String(!floating));
+  UI.backgroundChoiceFloating.setAttribute('aria-pressed', String(floating));
+  UI.backgroundButton.textContent = '隐藏到后台';
+  const closeLabel = state.active && floating ? '显示漂浮窗' : '隐藏到后台';
+  UI.windowCloseButton.setAttribute('aria-label', closeLabel);
+  UI.windowCloseButton.title = closeLabel;
+}
+
+function setBackgroundActionExpanded(expanded) {
+  const open = Boolean(expanded) && !UI.backgroundButton.disabled;
+  UI.backgroundAction.classList.toggle('menu-open', open);
+  UI.backgroundButton.setAttribute('aria-expanded', String(open));
+  UI.backgroundActionMenu.setAttribute('aria-hidden', String(!open));
+}
+
+function setBackgroundControlDisabled(disabled) {
+  const next = Boolean(disabled);
+  UI.backgroundButton.disabled = next;
+  UI.backgroundChoiceHidden.disabled = next;
+  UI.backgroundChoiceFloating.disabled = next;
+  if (next) setBackgroundActionExpanded(false);
+}
+
+let backgroundPreferenceMutation = 0;
+
+async function setBackgroundMode(mode) {
+  const normalized = mode === 'floating' ? 'floating' : 'hidden';
+  const mutation = ++backgroundPreferenceMutation;
+  state.settings.backgroundMode = normalized;
+  updateBackgroundModeUi();
+  try {
+    const saved = await window.desktopAPI.setBackgroundPreference(normalized);
+    if (mutation !== backgroundPreferenceMutation) return;
+    state.settings.backgroundMode = saved?.backgroundMode === 'floating' ? 'floating' : 'hidden';
+  } catch (error) {
+    if (mutation === backgroundPreferenceMutation) {
+      const persisted = await window.desktopAPI.getBackgroundPreference().catch(() => null);
+      state.settings.backgroundMode = persisted?.backgroundMode === 'floating' ? 'floating' : 'hidden';
+    }
+    throw error;
+  } finally {
+    if (mutation === backgroundPreferenceMutation) updateBackgroundModeUi();
   }
 }
 
@@ -507,7 +530,7 @@ function startAllowed() {
     || state.presentation
     || state.enrollmentOpen
   ) return false;
-  return state.mode === 'study' || state.speakerReady;
+  return state.mode === 'study' ? state.audioEventReady : state.speakerReady;
 }
 
 function preflightCanStart() {
@@ -527,7 +550,8 @@ function preflightCanStart() {
     || state.preflightStopping
   ) return false;
   return state.mode === 'study'
-    || (state.speakerReady && state.speakerProfileExists && !state.speakerModelError);
+    ? state.audioEventReady
+    : (state.speakerReady && state.speakerProfileExists && !state.speakerModelError);
 }
 
 function isPreflightAudioActive() {
@@ -552,9 +576,23 @@ function isReciteDetectionActive() {
   );
 }
 
+function isStudyDetectionActive() {
+  if (state.mode !== 'study' || !state.audioEventReady || !state.silenceArmed) return false;
+  if (state.calibrating || state.alertOpen || state.silencePausedAt) return false;
+  return isPreflightAudioActive() || (
+    state.active
+    && state.sessionPhase === 'studying'
+    && state.introComplete
+  );
+}
+
 function updatePreflightUi(status) {
   if (!UI.preflightTestButton || !UI.preflightTestStatus) return;
-  if (typeof status === 'string') UI.preflightTestStatus.textContent = status;
+  const setStatus = (text) => {
+    UI.preflightTestStatus.textContent = text;
+    UI.preflightTestStatus.classList.toggle('watch-copy', text === '好好学！盯着你呢！');
+  };
+  if (typeof status === 'string') setStatus(status);
   if (state.preflightTesting) {
     UI.preflightTestButton.disabled = false;
     UI.preflightTestButton.textContent = '停止测试';
@@ -568,11 +606,13 @@ function updatePreflightUi(status) {
   UI.preflightTestButton.textContent = '测试当前设置';
   UI.preflightTestButton.disabled = !preflightCanStart();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
-    UI.preflightTestStatus.textContent = state.speakerProfileError
+    setStatus(state.speakerProfileError
       ? `${state.speakerProfileError} 请重新录入一次。`
-      : '请先录入本人声音，再测试背书检测。';
+      : '请先录入本人声音，再测试背书检测。');
   } else if (state.mode === 'recite' && !state.speakerReady) {
-    UI.preflightTestStatus.textContent = state.speakerModelError || '正在准备声纹模型…';
+    setStatus(state.speakerModelError || '正在准备声纹模型…');
+  } else if (state.mode === 'study' && !state.audioEventReady) {
+    setStatus(state.audioEventError || '正在准备声音分类模型…');
   }
 }
 
@@ -599,19 +639,12 @@ function updateModeUi() {
   UI.stopButton.textContent = studyingQuietly ? '结束本次自习' : '结束本次背书';
   UI.voicePanelTitle.textContent = studyingQuietly ? '安静自习检测' : '本人声纹巡查';
   UI.liveVoiceTitle.textContent = studyingQuietly ? '安静检测' : '本人出声检测';
-  UI.voiceThresholdLabel.textContent = studyingQuietly ? '出声门槛' : '抗噪幅度';
   UI.silenceLimit.value = String(state.settings.reciteSilenceSeconds);
   UI.silenceLimitValue.textContent = `${state.settings.reciteSilenceSeconds} 秒`;
   UI.studyVoiceLimit.value = String(state.settings.studyVoiceSeconds);
   UI.studyVoiceLimitValue.textContent = `${state.settings.studyVoiceSeconds} 秒`;
-  UI.voiceThreshold.min = studyingQuietly ? '6' : '4';
-  UI.voiceThreshold.max = studyingQuietly ? '16' : '18';
-  UI.voiceThreshold.value = String(
-    studyingQuietly ? state.settings.studySensitivityDb : state.settings.reciteSensitivityDb,
-  );
   document.querySelectorAll('.study-only').forEach((element) => { element.hidden = !studyingQuietly; });
   document.querySelectorAll('.recite-only').forEach((element) => { element.hidden = studyingQuietly; });
-  updateThreshold({ persist: false });
   if (!state.active) {
     UI.startButton.disabled = !startAllowed();
     if (state.startPending) UI.startButton.textContent = '正在启动麦克风…';
@@ -619,9 +652,9 @@ function updateModeUi() {
     else if (state.speakerProfileMutationPending) UI.startButton.textContent = '正在更新声纹…';
     else if (state.enrollmentPending || state.enrollmentOpen) UI.startButton.textContent = '正在录入声纹';
     else if (startAllowed()) UI.startButton.textContent = state.sessionEnded ? '重新开始学习' : '开始学习';
-    else UI.startButton.textContent = state.mode === 'recite' && !state.speakerReady
-      ? '声纹模型不可用'
-      : '正在准备场景…';
+    else if (state.mode === 'recite' && !state.speakerReady) UI.startButton.textContent = '声纹模型不可用';
+    else if (state.mode === 'study' && !state.audioEventReady) UI.startButton.textContent = '声音分类不可用';
+    else UI.startButton.textContent = '正在准备场景…';
   }
   UI.previewClipButton.disabled = !state.mediaCatalog.length
     || idleOperationBusy
@@ -632,6 +665,7 @@ function updateModeUi() {
   renderMicrophoneUi();
   updateBreakButton();
   updatePreflightUi();
+  updateBackgroundModeUi();
 }
 
 function setMode(mode) {
@@ -658,6 +692,9 @@ function setMode(mode) {
     UI.voiceStatus.textContent = state.speakerProfileError
       ? `${state.speakerProfileError} 请重新录入一次。`
       : '开始学习前先录入本人声音';
+  } else if (mode === 'study' && !state.audioEventReady) {
+    setChip(UI.voiceState, '声音分类不可用', 'alert');
+    UI.voiceStatus.textContent = state.audioEventError || '本地声音分类模型不可用';
   } else if (!state.active) {
     setChip(UI.voiceState, mode === 'study' ? '等待安静自习' : '未开启');
     UI.voiceStatus.textContent = '未在检测声音';
@@ -670,17 +707,27 @@ function setMode(mode) {
 }
 
 function updateSpeakerProfileUi() {
+  const speakerActionDisabled = state.active
+    || state.startPending
+    || state.previewPending
+    || state.speakerProfileMutationPending
+    || state.sceneRunning
+    || Boolean(state.presentation)
+    || state.enrollmentPending
+    || state.enrollmentBusy;
   if (state.speakerModelError) {
     setChip(UI.speakerProfileState, '声纹模型不可用', 'alert');
     UI.speakerEnrollButton.disabled = true;
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
+    UI.speakerDeleteButton.disabled = speakerActionDisabled;
     UI.speakerProfileSelect.hidden = true;
     return;
   }
   if (!state.speakerReady) {
     setChip(UI.speakerProfileState, '正在加载声纹模型…');
     UI.speakerEnrollButton.disabled = true;
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
+    UI.speakerDeleteButton.disabled = speakerActionDisabled;
     UI.speakerProfileSelect.hidden = true;
     return;
   }
@@ -700,17 +747,9 @@ function updateSpeakerProfileUi() {
   } else {
     setChip(UI.speakerProfileState, state.speakerProfileError ? '旧声纹需要重新录入' : '尚未录入本人声纹', state.speakerProfileError ? 'alert' : '');
     UI.speakerEnrollButton.textContent = '录入本人声音';
-    UI.speakerDeleteButton.hidden = true;
+    UI.speakerDeleteButton.hidden = !state.speakerProfileArtifactExists;
     UI.speakerProfileSelect.hidden = true;
   }
-  const speakerActionDisabled = state.active
-    || state.startPending
-    || state.previewPending
-    || state.speakerProfileMutationPending
-    || state.sceneRunning
-    || Boolean(state.presentation)
-    || state.enrollmentPending
-    || state.enrollmentBusy;
   UI.speakerEnrollButton.disabled = speakerActionDisabled;
   UI.speakerDeleteButton.disabled = speakerActionDisabled;
   UI.speakerProfileSelect.disabled = speakerActionDisabled;
@@ -722,6 +761,7 @@ async function refreshSpeakerState() {
     const profile = await window.desktopAPI.getSpeakerState();
     state.speakerReady = Boolean(profile?.ready);
     state.speakerProfileExists = Boolean(profile?.profileExists);
+    state.speakerProfileArtifactExists = Boolean(profile?.profileArtifactExists);
     state.speakerProfileCreatedAt = profile?.createdAt || '';
     state.speakerProfiles = Array.isArray(profile?.profiles) ? profile.profiles : [];
     state.speakerModelError = state.speakerReady ? '' : (profile?.error || '声纹服务启动失败');
@@ -729,6 +769,7 @@ async function refreshSpeakerState() {
   } catch (error) {
     state.speakerReady = false;
     state.speakerProfileExists = false;
+    state.speakerProfileArtifactExists = false;
     state.speakerProfiles = [];
     state.speakerModelError = error.message || '声纹服务启动失败';
     state.speakerProfileError = '';
@@ -742,10 +783,24 @@ async function refreshSpeakerState() {
   return state.speakerReady && state.speakerProfileExists;
 }
 
+async function refreshAudioEventState() {
+  try {
+    const service = await window.desktopAPI.getAudioEventState();
+    state.audioEventReady = Boolean(service?.ready);
+    state.audioEventError = state.audioEventReady ? '' : (service?.error || '声音分类服务启动失败');
+  } catch (error) {
+    state.audioEventReady = false;
+    state.audioEventError = error.message || '声音分类服务启动失败';
+  }
+  updateModeUi();
+  updatePreflightUi();
+  return state.audioEventReady;
+}
+
 function setEnrollmentBusy(busy) {
   state.enrollmentBusy = busy;
   UI.enrollmentMicButton.disabled = busy;
-  UI.enrollmentCancelButton.disabled = busy;
+  UI.enrollmentCancelButton.disabled = !state.enrollmentOpen;
   updateSpeakerProfileUi();
 }
 
@@ -781,7 +836,12 @@ async function openSpeakerEnrollment() {
         return false;
       }
     }
-    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() });
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment({
+      label: selectedMicrophoneProfileLabel(),
+    });
+    state.enrollmentGeneration += 1;
+    state.enrollmentId = enrollment?.enrollmentId || null;
+    if (!state.enrollmentId) throw new Error('声纹录入会话启动失败。');
     state.enrollmentOpen = true;
     state.enrollmentBusy = false;
     UI.enrollmentMicState.textContent = '麦克风：准备就绪';
@@ -800,17 +860,40 @@ async function openSpeakerEnrollment() {
 
 async function closeSpeakerEnrollment({ cancel = false } = {}) {
   if (!state.enrollmentOpen) return;
-  if (cancel) await window.desktopAPI.cancelSpeakerEnrollment().catch(() => {});
+  const enrollmentId = state.enrollmentId;
+  state.enrollmentGeneration += 1;
+  state.enrollmentCaptureCancel?.();
+  state.enrollmentCaptureCancel = null;
   state.enrollmentOpen = false;
   state.enrollmentBusy = false;
+  state.enrollmentId = null;
   UI.speakerEnrollment.hidden = true;
   document.body.classList.remove('enrollment-mode');
   updateSpeakerProfileUi();
   updateModeUi();
+  if (cancel && enrollmentId) {
+    await window.desktopAPI.cancelSpeakerEnrollment(enrollmentId).catch(() => {});
+  }
 }
 
-async function captureEnrollmentMicrophone(durationSeconds) {
-  const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints());
+function enrollmentCancelledError() {
+  const error = new Error('声纹录入已取消。');
+  error.code = 'ENROLLMENT_CANCELLED';
+  return error;
+}
+
+function assertEnrollmentGeneration(generation) {
+  if (!state.enrollmentOpen || generation !== state.enrollmentGeneration) {
+    throw enrollmentCancelledError();
+  }
+}
+
+async function captureEnrollmentMicrophone(durationSeconds, generation) {
+  const stream = await navigator.mediaDevices.getUserMedia(microphoneConstraints({ rawStudyAudio: false }));
+  if (!state.enrollmentOpen || generation !== state.enrollmentGeneration) {
+    stream.getTracks().forEach((track) => track.stop());
+    throw enrollmentCancelledError();
+  }
   const AudioContextClass = window.AudioContext || window.webkitAudioContext;
   let context;
   try {
@@ -827,22 +910,53 @@ async function captureEnrollmentMicrophone(durationSeconds) {
   let totalLength = 0;
   let capture = null;
   let progressTimer = null;
-  const startedAt = Date.now();
+  let durationTimer = null;
+  let rejectDuration = null;
+  let cancelled = false;
+  const startedAt = monotonicNow();
+  const cancelCapture = () => {
+    if (cancelled) return;
+    cancelled = true;
+    if (state.enrollmentOpen && generation === state.enrollmentGeneration) {
+      state.enrollmentGeneration += 1;
+      window.queueMicrotask(() => {
+        closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+      });
+    }
+    window.clearTimeout(durationTimer);
+    rejectDuration?.(enrollmentCancelledError());
+    capture?.stop();
+    stream.getTracks().forEach((track) => track.stop());
+    if (context && context.state !== 'closed') context.close().catch(() => {});
+  };
+  state.enrollmentCaptureCancel = cancelCapture;
+  stream.getAudioTracks().forEach((track) => {
+    track.addEventListener('ended', cancelCapture, { once: true });
+    track.addEventListener('mute', cancelCapture, { once: true });
+  });
   try {
     await context.resume();
+    assertEnrollmentGeneration(generation);
     const source = context.createMediaStreamSource(stream);
     capture = new SpeakerAudio.ContinuousPcmCapture(context, source, (chunk) => {
       chunks.push(chunk);
       totalLength += chunk.length;
     });
     await capture.start();
+    assertEnrollmentGeneration(generation);
     progressTimer = window.setInterval(() => {
-      const remaining = Math.max(0, Math.ceil(durationSeconds - ((Date.now() - startedAt) / 1000)));
+      const remaining = Math.max(0, Math.ceil(durationSeconds - ((monotonicNow() - startedAt) / 1000)));
       UI.enrollmentMicState.textContent = `麦克风：请连续朗读 ${remaining} 秒`;
     }, 200);
-    await new Promise((resolve) => window.setTimeout(resolve, durationSeconds * 1000));
+    await new Promise((resolve, reject) => {
+      rejectDuration = reject;
+      durationTimer = window.setTimeout(resolve, durationSeconds * 1000);
+    });
+    assertEnrollmentGeneration(generation);
   } finally {
     window.clearInterval(progressTimer);
+    window.clearTimeout(durationTimer);
+    if (state.enrollmentCaptureCancel === cancelCapture) state.enrollmentCaptureCancel = null;
     capture?.stop();
     stream.getTracks().forEach((track) => track.stop());
     await context.close().catch(() => {});
@@ -855,10 +969,12 @@ async function captureEnrollmentMicrophone(durationSeconds) {
 
 async function runEnrollmentMicrophone() {
   if (!state.enrollmentOpen || state.enrollmentBusy) return;
+  const generation = state.enrollmentGeneration;
   setEnrollmentBusy(true);
   UI.enrollmentStatus.textContent = '请保持平时背书的音量，连续朗读任意内容。';
   try {
-    const samples = await captureEnrollmentMicrophone(ENROLLMENT_DURATION_SECONDS);
+    const samples = await captureEnrollmentMicrophone(ENROLLMENT_DURATION_SECONDS, generation);
+    assertEnrollmentGeneration(generation);
     const dynamics = SpeakerAudio.analyzeDynamics(samples, SpeakerAudio.TARGET_SAMPLE_RATE);
     if (dynamics.standardDeviationDb < 2 || dynamics.spreadDb < 6) {
       throw new Error('没有检测到足够清晰的连续朗读，请重新录入。');
@@ -869,14 +985,19 @@ async function runEnrollmentMicrophone() {
       minimumDurationSeconds: ENROLLMENT_DURATION_SECONDS - 2,
     });
     for (let index = 0; index < windows.length; index += 1) {
+      assertEnrollmentGeneration(generation);
       UI.enrollmentMicState.textContent = `麦克风：正在提取 ${index + 1}/${windows.length}`;
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId: state.enrollmentId,
         source: 'mic',
         samples: windows[index],
         sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
       });
+      assertEnrollmentGeneration(generation);
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    assertEnrollmentGeneration(generation);
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(state.enrollmentId);
+    assertEnrollmentGeneration(generation);
     state.speakerProfileExists = Boolean(profile?.profileExists);
     state.speakerProfileCreatedAt = profile?.createdAt || '';
     UI.enrollmentMicState.textContent = '麦克风：录入完成';
@@ -885,8 +1006,23 @@ async function runEnrollmentMicrophone() {
     await closeSpeakerEnrollment();
     await refreshSpeakerState();
   } catch (error) {
-    await window.desktopAPI.cancelSpeakerEnrollment().catch(() => {});
-    await window.desktopAPI.beginSpeakerEnrollment({ label: selectedMicrophoneProfileLabel() }).catch(() => {});
+    if (error?.code === 'ENROLLMENT_CANCELLED'
+      || generation !== state.enrollmentGeneration
+      || !state.enrollmentOpen) return;
+    const failedEnrollmentId = state.enrollmentId;
+    if (failedEnrollmentId) {
+      await window.desktopAPI.cancelSpeakerEnrollment(failedEnrollmentId).catch(() => {});
+    }
+    const restartedEnrollment = await window.desktopAPI.beginSpeakerEnrollment({
+      label: selectedMicrophoneProfileLabel(),
+    }).catch(() => null);
+    state.enrollmentId = restartedEnrollment?.enrollmentId || null;
+    if (!state.enrollmentId) {
+      UI.voiceStatus.textContent = '声纹服务当前不可用，请稍后重新打开录入。';
+      await closeSpeakerEnrollment();
+      await refreshSpeakerState();
+      return;
+    }
     UI.enrollmentMicState.textContent = '麦克风：录入失败';
     UI.enrollmentStatus.textContent = error.message;
     UI.enrollmentMicButton.textContent = `重新录入 ${ENROLLMENT_DURATION_SECONDS} 秒`;
@@ -906,7 +1042,7 @@ async function deleteSpeakerProfile() {
     || state.enrollmentOpen
     || state.enrollmentPending
     || state.enrollmentBusy
-    || !state.speakerProfileExists
+    || (!state.speakerProfileExists && !state.speakerProfileArtifactExists)
   ) return;
   if (!window.confirm('删除保存在本机的本人声纹？')) return;
   state.speakerProfileMutationPending = true;
@@ -915,9 +1051,13 @@ async function deleteSpeakerProfile() {
   try {
     await stopPreflightTest({ status: '本人声纹已删除，请重新录入后再测试。' });
     if (state.active || state.startPending || state.previewPending || state.presentation || state.enrollmentOpen) return;
-    const profileId = UI.speakerProfileSelect.value;
-    if (!profileId) throw new Error('请先选择要删除的声纹。');
-    await window.desktopAPI.deleteSpeakerProfile(profileId);
+    if (state.speakerProfileExists) {
+      const profileId = UI.speakerProfileSelect.value;
+      if (!profileId) throw new Error('请先选择要删除的声纹。');
+      await window.desktopAPI.deleteSpeakerProfile(profileId);
+    } else {
+      await window.desktopAPI.deleteSpeakerProfileArtifact();
+    }
     await refreshSpeakerState();
     UI.voiceStatus.textContent = '本人声纹已删除';
   } finally {
@@ -1046,7 +1186,7 @@ async function playPlan(plan, token) {
       && prepared.clipId === RULES.CLIPS.R_SALUTE,
     );
     state.trace.push({
-      at: Date.now(),
+      at: monotonicNow(),
       clipId: prepared.clipId,
       phase: phases[index],
       kind: plan.kind,
@@ -1120,6 +1260,7 @@ function settleStudyMilestones() {
   if (!state.active || !state.milestoneLedger) return [];
   const events = state.milestoneLedger.settle(effectiveElapsedMs());
   let earnedBreak = false;
+  let earnedPraise = false;
   events.forEach((event) => {
     if (event.type === 'break-voucher-earned') {
       earnedBreak = true;
@@ -1127,10 +1268,17 @@ function settleStudyMilestones() {
       addLog(`获得 1 次两分钟休息，现有 ${currentBreakCredits()} 次。`);
     } else if (event.type === 'praise-earned') {
       state.earnedPraiseMarks = Math.max(state.earnedPraiseMarks, event.milestoneIndex);
+      earnedPraise = true;
     }
   });
   updateBreakButton();
   if (earnedBreak) showEarnedBreakPrompt().catch(handleAuxiliaryUiError);
+  if (
+    earnedPraise
+    && state.sessionPhase === 'studying'
+    && !state.eventBusy
+    && !state.pendingViolation
+  ) scheduleNextPatrol(250);
   return events;
 }
 
@@ -1150,12 +1298,12 @@ function scheduleNextPatrol(delayMs = RULES.nextPatrolDelay(random)) {
     || state.pendingViolation
   ) return;
   const delay = Math.max(0, Number(delayMs) || 0);
-  state.nextPatrolAt = Date.now() + delay;
+  state.nextPatrolAt = monotonicNow() + delay;
   state.patrolTimer = window.setTimeout(() => {
     state.patrolTimer = null;
     state.nextPatrolAt = 0;
     if (!state.active || state.sessionPhase !== 'studying' || state.stopRequested || state.pendingViolation) return;
-    if (state.windowMode === 'hidden') {
+    if (state.windowMode === 'hidden' && state.earnedPraiseMarks <= state.praisedMark) {
       scheduleNextPatrol();
       return;
     }
@@ -1173,21 +1321,31 @@ function armSilenceClock() {
     || state.alertOpen
   ) return;
   state.silenceArmed = true;
-  state.silentSince = state.mode === 'recite' ? Date.now() : 0;
+  state.silentSince = state.mode === 'recite' ? monotonicNow() : 0;
   state.silencePausedAt = 0;
   state.quietDetector?.reset();
+  if (state.mode === 'study') resetStudyAudioRuntime();
 }
 
 function pauseSilenceClock() {
   if (!state.silenceArmed || state.silencePausedAt) return;
-  state.silencePausedAt = Date.now();
+  state.silencePausedAt = monotonicNow();
+  if (state.mode === 'study') resetStudyAudioRuntime();
+  showAnimationWatchState();
 }
 
 function resumeSilenceClock() {
   if (!state.silencePausedAt) return;
-  if (state.silentSince) state.silentSince += Math.max(0, Date.now() - state.silencePausedAt);
+  if (state.silentSince) state.silentSince += Math.max(0, monotonicNow() - state.silencePausedAt);
   state.silencePausedAt = 0;
-  state.quietDetector?.reset();
+  if (state.mode === 'study') resetStudyAudioRuntime();
+  showAnimationWatchState();
+}
+
+function showAnimationWatchState() {
+  const label = '好好学！盯着你呢！';
+  setChip(UI.voiceState, label, 'watch');
+  UI.voiceStatus.textContent = label;
 }
 
 function enterStudyingPhase() {
@@ -1220,8 +1378,8 @@ async function runIntro() {
     return;
   }
   if (!state.active) return;
-  UI.sessionState.textContent = '校准声音中';
-  beginNoiseCalibration();
+  UI.sessionState.textContent = state.mode === 'study' ? '声音检测准备中' : '本人声音检测准备中';
+  beginDetectionWarmup();
 }
 
 async function runResumeIntro() {
@@ -1248,8 +1406,8 @@ async function runResumeIntro() {
     const opened = await openMicrophone();
     if (!opened) return;
     if (!state.active || generation !== state.restGeneration) return;
-    UI.sessionState.textContent = '校准声音中';
-    beginNoiseCalibration();
+    UI.sessionState.textContent = state.mode === 'study' ? '声音检测准备中' : '本人声音检测准备中';
+    beginDetectionWarmup();
   } catch (error) {
     UI.voiceStatus.textContent = `休息后无法恢复麦克风：${error.message}`;
     addLog(`麦克风恢复失败：${error.message}`);
@@ -1276,29 +1434,46 @@ async function runScheduledEvent(planOverride = null) {
     ? RULES.normalPatrolPlan(planOptions)
     : RULES.scheduledPlan(planOptions));
   const praiseMark = plan.praiseMark ?? plan.salutedHourMark;
-  const pausesStudyClock = planUsesSourceAudio(plan);
+  const milestonePraise = Boolean(plan.milestonePraise || plan.hourlySalute);
+  const revealPraiseFromBackground = milestonePraise
+    && (state.windowMode === 'hidden' || state.windowMode === 'floating');
+  const pausesAudioDetection = planUsesSourceAudio(plan);
+  const pausesStudyClock = pausesAudioDetection;
   const token = state.sceneToken;
   state.eventBusy = true;
   updateBreakButton();
-  pauseSilenceClock();
+  showAnimationWatchState();
+  if (pausesAudioDetection) pauseSilenceClock();
   if (pausesStudyClock) state.studyClock.pause();
-  state.eventPromise = playPlan(plan, token);
   let playbackCompleted = false;
+  let praiseAlertId = 0;
   try {
+    if (revealPraiseFromBackground) {
+      document.body.classList.add('praise-presentation');
+      const reveal = await window.desktopAPI.revealForInlineAlert();
+      praiseAlertId = Number(reveal?.alertId) || 0;
+      if (!praiseAlertId) throw new Error('表扬场景未能显示。');
+    }
+    state.eventPromise = playPlan(plan, token);
     playbackCompleted = await state.eventPromise;
   } finally {
     if (token === state.sceneToken) state.eventBusy = false;
     state.eventPromise = null;
-    if (token === state.sceneToken) resumeSilenceClock();
+    if (token === state.sceneToken && pausesAudioDetection) resumeSilenceClock();
     if (pausesStudyClock && state.active && state.sessionPhase === 'studying') {
       state.studyClock.resume();
     }
+    if (praiseAlertId > 0) {
+      await window.desktopAPI.finishInlineAlert({ alertId: praiseAlertId, disposition: 'return' })
+        .catch(handleAuxiliaryUiError);
+    }
+    document.body.classList.remove('praise-presentation');
     updateBreakButton();
     showEarnedBreakPrompt().catch(handleAuxiliaryUiError);
   }
 
   if (token !== state.sceneToken) return false;
-  if (playbackCompleted && (plan.milestonePraise || plan.hourlySalute)) {
+  if (playbackCompleted && milestonePraise) {
     state.praisedMark = praiseMark;
     addLog(`${praiseCaption(state.praisedMark)}。`);
   }
@@ -1325,8 +1500,18 @@ async function openMicrophone() {
     }
     const audioTracks = audioStream.getAudioTracks();
     if (!audioTracks.length) throw new Error('麦克风没有可用的实时音频轨道。');
+    const microphoneSettings = typeof audioTracks[0].getSettings === 'function'
+      ? audioTracks[0].getSettings()
+      : {};
+    const enabledProcessing = state.mode === 'study'
+      ? ['echoCancellation', 'noiseSuppression', 'autoGainControl']
+        .filter((name) => microphoneSettings?.[name] === true)
+      : [];
+    state.microphoneProcessingWarning = enabledProcessing.length
+      ? '麦克风驱动仍启用了声音处理，电脑扬声器中的视频声可能被削弱。'
+      : '';
     audioTracks.forEach((track) => {
-      track.addEventListener('ended', () => {
+      const handleTrackUnavailable = () => {
         if (generation !== state.microphoneGeneration) return;
         if ((state.preflightTesting || state.preflightStarting) && !state.preflightStopping) {
           stopPreflightTest({ status: '麦克风已断开，测试已停止。' }).catch(handleAuxiliaryUiError);
@@ -1334,7 +1519,9 @@ async function openMicrophone() {
           const error = new Error('麦克风已断开。');
           handleSessionFlowError(error, { voiceMessage: '麦克风已断开，学习已安全停止。' });
         }
-      }, { once: true });
+      };
+      track.addEventListener('ended', handleTrackUnavailable, { once: true });
+      track.addEventListener('mute', handleTrackUnavailable, { once: true });
     });
     if (generation !== state.microphoneGeneration) {
       audioStream.getTracks().forEach((track) => track.stop());
@@ -1352,15 +1539,26 @@ async function openMicrophone() {
     analyser.fftSize = 2048;
     analyser.smoothingTimeConstant = 0.15;
     source.connect(analyser);
+    audioContext.addEventListener('statechange', () => {
+      if (
+        generation !== state.microphoneGeneration
+        || audioContext.state === 'running'
+        || (!state.active && !state.startPending && !isPreflightAudioActive())
+      ) return;
+      const error = new Error('麦克风音频处理已停止。');
+      if (isPreflightAudioActive()) {
+        stopPreflightTest({ status: '麦克风音频处理已停止，测试已停止。' }).catch(handleAuxiliaryUiError);
+      } else {
+        handleSessionFlowError(error, { voiceMessage: '麦克风音频处理已停止，学习已安全停止。' });
+      }
+    });
 
-    if (state.mode === 'recite') {
-      pcmCapture = new SpeakerAudio.ContinuousPcmCapture(
-        audioContext,
-        source,
-        onRuntimePcmChunk,
-      );
-      await pcmCapture.start();
-    }
+    pcmCapture = new SpeakerAudio.ContinuousPcmCapture(
+      audioContext,
+      source,
+      onRuntimePcmChunk,
+    );
+    await pcmCapture.start();
     if (generation !== state.microphoneGeneration) {
       pcmCapture?.stop();
       audioStream.getTracks().forEach((track) => track.stop());
@@ -1378,8 +1576,13 @@ async function openMicrophone() {
     state.previousSpectrum = null;
     state.audioStream = audioStream;
     state.pcmCapture = pcmCapture;
+    state.microphoneHealthFailurePending = false;
+    state.lastPcmAt = monotonicNow();
+    state.lastNonZeroPcmAt = state.lastPcmAt;
     window.clearInterval(state.audioTimer);
     state.audioTimer = window.setInterval(pollMicrophone, MICROPHONE_POLL_MS);
+    window.clearInterval(state.microphoneHealthTimer);
+    state.microphoneHealthTimer = window.setInterval(checkMicrophoneHealth, 1_000);
     refreshMicrophones().catch(() => {});
     return true;
   } catch (error) {
@@ -1394,6 +1597,8 @@ async function releaseMicrophone() {
   state.microphoneGeneration += 1;
   window.clearInterval(state.audioTimer);
   state.audioTimer = null;
+  window.clearInterval(state.microphoneHealthTimer);
+  state.microphoneHealthTimer = null;
   try {
     state.pcmCapture?.stop();
   } catch (error) {
@@ -1424,6 +1629,11 @@ async function releaseMicrophone() {
   state.silentSince = 0;
   state.silencePausedAt = 0;
   resetSpeakerRuntime();
+  resetStudyAudioRuntime();
+  state.microphoneProcessingWarning = '';
+  state.microphoneHealthFailurePending = false;
+  state.lastPcmAt = 0;
+  state.lastNonZeroPcmAt = 0;
 }
 
 function resetIdleDetectionUi() {
@@ -1435,7 +1645,6 @@ function resetIdleDetectionUi() {
   UI.liveVolumeBar.style.width = '0%';
   UI.meter.setAttribute('aria-valuenow', '0');
   UI.liveMeter.setAttribute('aria-valuenow', '0');
-  renderThresholdMarkers();
   document.body.dataset.voiceDetected = 'false';
   document.body.dataset.vadState = 'stopped';
 }
@@ -1478,6 +1687,13 @@ async function startPreflightTest() {
     updatePreflightUi('请先录入本人声音，再测试背书检测。');
     return false;
   }
+  if (state.mode === 'study' && !state.audioEventReady) {
+    await refreshAudioEventState();
+    if (!state.audioEventReady) {
+      updatePreflightUi(state.audioEventError || '声音分类模型不可用。');
+      return false;
+    }
+  }
   if (!preflightCanStart()) {
     updatePreflightUi('当前状态不能测试，请先结束正在进行的操作。');
     return false;
@@ -1494,14 +1710,18 @@ async function startPreflightTest() {
   state.preflightStarting = true;
   state.preflightThresholdReached = false;
   state.preflightSpeakerError = '';
-  updatePreflightUi('启动麦克风后将先校准 3 秒环境底噪。');
+  updatePreflightUi(state.mode === 'study'
+    ? '启动麦克风后直接检测声音。'
+    : '启动麦克风后将自动适应当前环境。');
   try {
     const opened = await openMicrophone();
     if (!opened || generation !== state.preflightGeneration || !state.preflightStarting) return false;
     state.preflightStarting = false;
     state.preflightTesting = true;
-    beginNoiseCalibration();
-    updatePreflightUi('正在校准环境底噪，请保持平时的学习环境。');
+    beginDetectionWarmup();
+    updatePreflightUi(state.mode === 'study'
+      ? '声音检测已开始，正在形成首个分类窗口。'
+      : '正在准备本人声音检测，请保持平时的学习环境。');
     return true;
   } catch (error) {
     if (generation !== state.preflightGeneration) return false;
@@ -1524,7 +1744,7 @@ function clearRestTimer() {
 
 function remainingRestSeconds() {
   if (!state.restDeadline) return 0;
-  return Math.max(0, Math.ceil((state.restDeadline - Date.now()) / 1_000));
+  return Math.max(0, Math.ceil((state.restDeadline - monotonicNow()) / 1_000));
 }
 
 async function updateRestPrompt() {
@@ -1591,7 +1811,7 @@ async function startBreak(durationOverrideMs = null) {
   state.silencePausedAt = 0;
   state.quietDetector?.reset();
   clearPatrolTimer();
-  state.restDeadline = Date.now() + durationMs;
+  state.restDeadline = monotonicNow() + durationMs;
   updateBreakButton();
   addLog('开始两分钟休息。');
 
@@ -1603,7 +1823,7 @@ async function startBreak(durationOverrideMs = null) {
       credits: currentBreakCredits(),
       remainingSeconds: remainingRestSeconds(),
     });
-    await window.desktopAPI.hideToBackground();
+    await window.desktopAPI.hideToBackground('hidden');
   } catch (error) {
     addLog(`休息提示显示失败：${error.message}`);
   }
@@ -1630,8 +1850,7 @@ function stopElapsedTimer() {
 function setStoppedControls(label = '待命') {
   state.sessionPhase = state.sessionEnded ? 'ended' : 'idle';
   UI.stopButton.disabled = true;
-  UI.backgroundButton.disabled = true;
-  UI.recalibrateButton.disabled = true;
+  setBackgroundControlDisabled(true);
   UI.previewClipButton.disabled = !state.mediaCatalog.length;
   UI.startButton.disabled = !startAllowed();
   UI.startButton.textContent = startAllowed()
@@ -1658,7 +1877,7 @@ function violationDescription() {
     : `本人连续 ${violationLimitSeconds()} 秒未出声`;
 }
 
-async function finishFatalViolation(plan) {
+async function finishFatalViolation(plan, alertId) {
   state.active = false;
   state.sessionPhase = 'ended';
   state.sessionEnded = true;
@@ -1671,8 +1890,8 @@ async function finishFatalViolation(plan) {
   state.studyClock.pause();
   await cancelRestState();
   await releaseMicrophone();
+  await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
   hideOverlay();
-  await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
   setStoppedControls('本次学习结束');
   addLog(`${violationDescription()}（第 ${plan.strike} 次），本次学习结束。`);
 }
@@ -1691,50 +1910,66 @@ async function runPendingViolation() {
   const token = state.sceneToken;
   state.eventBusy = true;
   updateBreakButton();
-  let returnToHidden = false;
+  let alertId = 0;
   let revealed = false;
   let playbackCompleted = false;
   let aborted = false;
+  showOverlay({
+    title: violationDescription(),
+    message: `第 ${plan.strike} 次提醒`,
+    controls: false,
+  });
   try {
     const revealResult = await window.desktopAPI.revealForInlineAlert();
-    revealed = true;
-    returnToHidden = Boolean(revealResult?.returnToHidden);
+    alertId = Number(revealResult?.alertId) || 0;
+    revealed = alertId > 0;
     if (token !== state.sceneToken || !state.active || state.stopRequested) {
       aborted = true;
     } else {
-      showOverlay({
-        title: violationDescription(),
-        message: `第 ${plan.strike} 次提醒`,
-        controls: false,
-      });
       state.eventPromise = playPlan(plan, token);
       playbackCompleted = await state.eventPromise;
     }
+  } catch (error) {
+    if (revealed) {
+      await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' }).catch(() => {});
+    }
+    state.alertOpen = false;
+    hideOverlay();
+    throw error;
   } finally {
     if (token === state.sceneToken) state.eventBusy = false;
     state.eventPromise = null;
     updateBreakButton();
   }
-  if (token !== state.sceneToken) return false;
+  if (token !== state.sceneToken) {
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
+    hideOverlay();
+    return false;
+  }
   if (aborted || !state.active || state.stopRequested) {
     state.alertOpen = false;
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
     hideOverlay();
-    if (revealed) await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
     if (state.stopRequested) await finalizeManualStop();
     return false;
   }
-  if (!playbackCompleted) return false;
+  if (!playbackCompleted) {
+    state.alertOpen = false;
+    if (revealed) await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
+    hideOverlay();
+    return false;
+  }
 
   state.lives = Math.max(0, state.lives - 1);
   if (plan.fatal) {
-    await finishFatalViolation(plan);
+    await finishFatalViolation(plan, alertId);
     return true;
   }
 
   state.alertOpen = false;
-  hideOverlay();
   if (state.stopRequested) {
-    await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+    await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'scene' });
+    hideOverlay();
     await finalizeManualStop();
     return true;
   }
@@ -1742,9 +1977,8 @@ async function runPendingViolation() {
   state.sessionPhase = 'studying';
   if (state.active) state.studyClock.resume();
   armSilenceClock();
-  await window.desktopAPI.finishInlineAlert({
-    returnToHidden: returnToHidden && state.active,
-  });
+  await window.desktopAPI.finishInlineAlert({ alertId, disposition: 'return' });
+  hideOverlay();
   scheduleNextPatrol();
   showEarnedBreakPrompt().catch(handleAuxiliaryUiError);
   return true;
@@ -1818,13 +2052,14 @@ async function stopSession(addEvent = true, immediateSceneReset = false) {
     state.finalizingStop = false;
     state.alertOpen = false;
     hideOverlay();
+    await window.desktopAPI.forceRestoreSceneMode().catch(handleAuxiliaryUiError);
     await showIdleScene().catch(() => {});
     setStoppedControls('待命');
     return;
   }
 
   UI.stopButton.disabled = true;
-  UI.backgroundButton.disabled = true;
+  setBackgroundControlDisabled(true);
   UI.startButton.disabled = true;
   UI.startButton.textContent = '正在结束…';
   UI.sessionState.textContent = '正在结束';
@@ -1873,7 +2108,7 @@ async function previewSelectedClip() {
     updateModeUi();
     updateSpeakerProfileUi();
     if (state.preflightTesting || state.preflightStarting || state.preflightStopping) {
-      await stopPreflightTest({ status: '动画预览期间暂停测试。' });
+      await stopPreflightTest({ status: '好好学！盯着你呢！' });
     }
     if (
       state.active
@@ -1890,17 +2125,18 @@ async function previewSelectedClip() {
     UI.previewClipButton.disabled = true;
     UI.startButton.disabled = true;
     const token = ++state.sceneToken;
-    const presentation = { kind: 'preview', token, clip };
+    const presentation = { kind: 'preview', token, clip, alertId: 0 };
     state.presentation = presentation;
     state.previewPending = false;
     updateModeUi();
     updateSpeakerProfileUi();
     updatePreflightUi();
     showOverlay({ title: '动画预览', message: `${clip.code}｜${clip.name}`, controls: true, preview: true });
-    await window.desktopAPI.revealForInlineAlert();
+    const revealResult = await window.desktopAPI.revealForInlineAlert();
+    presentation.alertId = Number(revealResult?.alertId) || 0;
     const prepared = await prepareClip(clip.id, true);
     if (state.presentation !== presentation || token !== state.sceneToken) return;
-    state.trace.push({ at: Date.now(), clipId: clip.id, phase: 'preview', kind: 'preview', fatal: false, strike: 0 });
+    state.trace.push({ at: monotonicNow(), clipId: clip.id, phase: 'preview', kind: 'preview', fatal: false, strike: 0 });
     await playPreparedToEnd(prepared, { phase: 'preview' });
   } catch (error) {
     if (state.presentation) handleSceneError(error);
@@ -1919,9 +2155,13 @@ async function finishPreview() {
   state.presentation = null;
   state.sceneToken += 1;
   await state.scenePlayer.stop();
-  hideOverlay();
   await showIdleScene().catch(() => {});
-  await window.desktopAPI.finishInlineAlert({ returnToHidden: false });
+  if (presentation.alertId > 0) {
+    await window.desktopAPI.finishInlineAlert({ alertId: presentation.alertId, disposition: 'scene' });
+  } else {
+    await window.desktopAPI.restoreSceneMode();
+  }
+  hideOverlay();
   updateModeUi();
   updateSpeakerProfileUi();
   updatePreflightUi('可继续测试当前检测设置。');
@@ -1929,9 +2169,12 @@ async function finishPreview() {
 
 function startElapsedTimer() {
   UI.timer.textContent = '00:00';
+  UI.floatingTimer.textContent = '已学习 00:00';
   stopElapsedTimer();
   state.elapsedTimer = window.setInterval(() => {
-    UI.timer.textContent = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    UI.timer.textContent = elapsed;
+    UI.floatingTimer.textContent = `已学习 ${elapsed}`;
     settleStudyMilestones();
   }, 1000);
 }
@@ -1987,11 +2230,20 @@ function calculateAudioFeatures() {
   };
 }
 
+function calculateAudioLevelPercent() {
+  state.analyser.getFloatTimeDomainData(state.samples);
+  const sum = state.samples.reduce((total, sample) => total + sample * sample, 0);
+  const rms = Math.sqrt(sum / Math.max(1, state.samples.length));
+  const db = Math.max(METER_MIN_DB, 20 * Math.log10(Math.max(rms, 0.00001)));
+  return clamp(Math.round(db - METER_MIN_DB), 0, 100);
+}
+
 function resetSpeakerRuntime() {
   state.speakerVerificationGeneration += 1;
   state.latestVadSpeech = false;
   state.speakerChunks = [];
   state.speakerSampleCount = 0;
+  state.speakerQuickProbeCompleted = false;
   state.speakerVerificationPending = false;
   state.lastSpeakerVerificationAt = 0;
   state.lastSpeakerDecisionAt = 0;
@@ -2007,39 +2259,223 @@ function resetSpeakerRuntime() {
   state.preflightSpeakerError = '';
 }
 
-async function verifyOwnerVoice(samples, sourceSampleRate) {
+function resetStudyAudioRuntime() {
+  state.studyAudioClassificationGeneration += 1;
+  state.studyAudioChunks = [];
+  state.studyAudioSampleCount = 0;
+  state.studyAudioClassificationQueue = [];
+  state.lastStudyAudioClassificationAt = 0;
+  state.latestStudyAudioDecision = null;
+}
+
+function failStudyAudioRuntime(error) {
+  state.studyAudioClassificationGeneration += 1;
+  state.studyAudioClassificationQueue = [];
+  state.audioEventReady = false;
+  state.audioEventError = error.message || '声音分类无法跟上实时音频';
+  if (isPreflightAudioActive()) {
+    stopPreflightTest({ status: `测试已停止：${state.audioEventError}` }).catch(handleAuxiliaryUiError);
+  } else if (state.active) {
+    handleSessionFlowError(error, {
+      voiceMessage: '声音分类无法跟上实时音频，学习已安全停止。',
+    });
+  }
+}
+
+function pumpStudyAudioClassificationQueue() {
+  if (state.studyAudioClassificationPending || !isStudyDetectionActive()) return;
+  const job = state.studyAudioClassificationQueue.shift();
+  if (!job) return;
+  const requestId = ++state.studyAudioClassificationRequestSequence;
+  state.studyAudioClassificationPending = true;
+  state.studyAudioClassificationInFlightId = requestId;
+  classifyStudyAudioWindow(
+    job.samples,
+    job.sampleRate,
+    STUDY_EVENT_INTERVAL_MS,
+    job.generation,
+    requestId,
+  );
+}
+
+function renderStudyAudioDecision(quietResult, decision) {
+  const preflight = isPreflightAudioActive();
+  const candidateActive = quietResult.rawEvidenceMs > 0;
+  state.latestQuietResult = quietResult;
+  state.latestStudyAudioDecision = decision;
+  document.body.dataset.voiceDetected = String(
+    decision.mediaEvidence || candidateActive,
+  );
+  if (preflight && quietResult.violated) state.preflightThresholdReached = true;
+  else if (preflight && quietResult.rearmed) state.preflightThresholdReached = false;
+
+  if (preflight && state.preflightThresholdReached) {
+    setChip(UI.voiceState, '已达到提醒条件', 'alert');
+    UI.voiceStatus.textContent = '已达到提醒条件';
+  } else if (decision.mediaEvidence && quietResult.suspectedSpeechMs <= 0) {
+    setChip(UI.voiceState, '正在复核媒体声音');
+    UI.voiceStatus.textContent = '正在复核媒体声音';
+  } else if (decision.mediaEvidence) {
+    const seconds = (quietResult.suspectedSpeechMs / 1_000).toFixed(1);
+    setChip(UI.voiceState, `疑似媒体声音 ${seconds} 秒`, 'alert');
+    UI.voiceStatus.textContent = `疑似媒体声音 ${seconds} 秒`;
+  } else if (candidateActive) {
+    setChip(UI.voiceState, '正在确认恢复');
+    UI.voiceStatus.textContent = '正在确认恢复';
+  } else if (!quietResult.armed) {
+    setChip(UI.voiceState, '等待恢复安静');
+    UI.voiceStatus.textContent = '保持安静后继续检测';
+  } else if (decision.keyboardOnly) {
+    setChip(UI.voiceState, '键盘输入', 'good');
+    UI.voiceStatus.textContent = '键盘输入';
+  } else {
+    setChip(UI.voiceState, '安静', 'good');
+    UI.voiceStatus.textContent = '当前安静';
+  }
+
+  if (preflight) {
+    if (state.preflightThresholdReached) {
+      updatePreflightUi('按当前设置将触发提醒。');
+    } else if (!decision.mediaEvidence && candidateActive) {
+      updatePreflightUi('正在确认恢复，连续正常 5 秒后清除本次累计。');
+    } else if (decision.mediaEvidence) {
+      updatePreflightUi(`已累计疑似媒体声音 ${(quietResult.suspectedSpeechMs / 1_000).toFixed(1)} 秒。`);
+    } else if (decision.keyboardOnly) {
+      updatePreflightUi('已识别为键盘输入，未达到提醒条件。');
+    } else if (state.microphoneProcessingWarning) {
+      updatePreflightUi(state.microphoneProcessingWarning);
+    } else {
+      updatePreflightUi('当前没有达到提醒条件。');
+    }
+  } else if (quietResult.violated) {
+    raiseSilenceAlert();
+  }
+  if (animationWatchPresentationActive()) showAnimationWatchState();
+}
+
+async function classifyStudyAudioWindow(samples, sampleRate, decisionDurationMs, generation, requestId) {
+  try {
+    const normalized = sampleRate === SpeakerAudio.TARGET_SAMPLE_RATE
+      ? samples
+      : SpeakerAudio.resampleLinear(samples, sampleRate, SpeakerAudio.TARGET_SAMPLE_RATE);
+    const result = await window.desktopAPI.classifyAudioEvents({
+      samples: normalized,
+      sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
+    });
+    if (generation !== state.studyAudioClassificationGeneration || !isStudyDetectionActive()) return;
+    const decision = POLICY.classifyStudyAudioEvents(result?.events);
+    const quietResult = state.quietDetector.process(
+      {
+        mediaEvidence: decision.mediaEvidence,
+        transientEvidence: decision.transientEvidence,
+      },
+      decisionDurationMs,
+    );
+    renderStudyAudioDecision(quietResult, decision);
+  } catch (error) {
+    if (generation !== state.studyAudioClassificationGeneration) return;
+    failStudyAudioRuntime(error);
+  } finally {
+    if (requestId === state.studyAudioClassificationInFlightId) {
+      state.studyAudioClassificationPending = false;
+      state.studyAudioClassificationInFlightId = 0;
+      pumpStudyAudioClassificationQueue();
+    }
+  }
+}
+
+function onStudyPcmChunk(chunk) {
+  if (!isStudyDetectionActive()) return;
+  const sampleRate = state.audioContext?.sampleRate || SpeakerAudio.TARGET_SAMPLE_RATE;
+  const targetLength = Math.round(sampleRate * STUDY_EVENT_WINDOW_SECONDS);
+  state.studyAudioChunks.push(chunk);
+  state.studyAudioSampleCount += chunk.length;
+
+  if (state.studyAudioSampleCount > targetLength * 2) {
+    const compacted = SpeakerAudio.concatChunks(state.studyAudioChunks, state.studyAudioSampleCount)
+      .slice(-targetLength);
+    state.studyAudioChunks = [compacted];
+    state.studyAudioSampleCount = compacted.length;
+  }
+
+  const now = monotonicNow();
+  if (
+    state.studyAudioSampleCount < targetLength
+    || (state.lastStudyAudioClassificationAt && now - state.lastStudyAudioClassificationAt < STUDY_EVENT_INTERVAL_MS)
+  ) return;
+
+  const allSamples = SpeakerAudio.concatChunks(state.studyAudioChunks, state.studyAudioSampleCount);
+  const windowSamples = allSamples.slice(Math.max(0, allSamples.length - targetLength));
+  state.studyAudioChunks = [windowSamples];
+  state.studyAudioSampleCount = windowSamples.length;
+  state.lastStudyAudioClassificationAt = now;
+  if (state.studyAudioClassificationPending
+    && state.studyAudioClassificationQueue.length >= STUDY_EVENT_MAX_QUEUED_WINDOWS) {
+    failStudyAudioRuntime(new Error('声音分类处理速度不足，检测已安全停止。'));
+    return;
+  }
+  state.studyAudioClassificationQueue.push({
+    samples: windowSamples,
+    sampleRate,
+    generation: state.studyAudioClassificationGeneration,
+  });
+  pumpStudyAudioClassificationQueue();
+}
+
+async function verifyOwnerVoice(samples, sourceSampleRate, { quickProbe = false } = {}) {
   if (
     state.speakerVerificationPending
     || !isReciteDetectionActive()
   ) return;
   const generation = state.speakerVerificationGeneration;
   state.speakerVerificationPending = true;
-  state.lastSpeakerVerificationAt = Date.now();
+  state.lastSpeakerVerificationAt = monotonicNow();
+  let verificationTimeout = null;
   try {
     const normalized = sourceSampleRate === SpeakerAudio.TARGET_SAMPLE_RATE
       ? samples
       : SpeakerAudio.resampleLinear(samples, sourceSampleRate, SpeakerAudio.TARGET_SAMPLE_RATE);
-    const result = await window.desktopAPI.verifySpeaker({
-      samples: normalized,
-      sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
-    });
+    const result = await Promise.race([
+      window.desktopAPI.verifySpeaker({
+        samples: normalized,
+        sampleRate: SpeakerAudio.TARGET_SAMPLE_RATE,
+      }),
+      new Promise((_, reject) => {
+        verificationTimeout = setTimeout(() => {
+          reject(new Error('声纹处理超时。'));
+        }, SPEAKER_VERIFY_TIMEOUT_MS);
+      }),
+    ]);
     if (
       generation !== state.speakerVerificationGeneration
       || !isReciteDetectionActive()
     ) return;
+    if (result?.error) throw new Error(
+      typeof result.error === 'string' ? result.error : '声纹服务暂时不可用。',
+    );
     state.preflightSpeakerError = '';
-    const now = Date.now();
+    const now = monotonicNow();
     const matched = Boolean(result?.matched);
     const strongMatch = Boolean(result?.strongMatch);
     const score = Number(result?.score) || 0;
     const threshold = Number(result?.threshold) || 0.55;
+    const quickConfirmed = quickProbe
+      && matched
+      && score >= SPEAKER_QUICK_CONFIRM_THRESHOLD;
+    if (quickProbe && !quickConfirmed) {
+      state.lastSpeakerVerificationAt = 0;
+      document.body.dataset.voiceDetected = 'false';
+      setChip(UI.voiceState, '正在复核本人声音');
+      UI.voiceStatus.textContent = '正在复核本人声音';
+      return;
+    }
     state.speakerMatchHistory.push({ at: now, matched });
     state.speakerMatchHistory = state.speakerMatchHistory
       .filter((item) => now - item.at <= 6_000)
       .slice(-3);
     const recentMatches = state.speakerMatchHistory.filter((item) => item.matched).length;
     const repeatedMatch = matched && recentMatches >= 2;
-    const confirmed = matched && (strongMatch || repeatedMatch);
+    const confirmed = quickConfirmed || (matched && (strongMatch || repeatedMatch));
     state.lastSpeakerDecisionAt = now;
     state.lastSpeakerMatched = confirmed;
     state.lastSpeakerNearMatch = !matched && score >= Math.max(0, threshold - 0.08);
@@ -2055,6 +2491,12 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
       state.lastSpeakerRejected = false;
       state.ownerConfirmedUntil = now + SPEAKER_CONFIRM_HOLD_MS;
       state.silentSince = 0;
+      if (quickProbe) {
+        state.speakerChunks = [];
+        state.speakerSampleCount = 0;
+        state.speakerQuickProbeCompleted = false;
+        state.lastSpeechChunkAt = 0;
+      }
       document.body.dataset.voiceDetected = 'true';
       setChip(UI.voiceState, '本人正在背书', 'good');
       UI.voiceStatus.textContent = '本人正在背书';
@@ -2066,7 +2508,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
     } else {
       if (state.ownerCandidateAt && now - state.ownerCandidateAt > 6_000) state.ownerCandidateAt = 0;
       document.body.dataset.voiceDetected = 'false';
-      const message = state.lastSpeakerRejected ? '暂未确认本人声音' : '正在复核本人声音';
+      const message = state.lastSpeakerRejected ? rejectedSpeakerStatus(now) : '正在复核本人声音';
       setChip(UI.voiceState, message, state.lastSpeakerRejected ? 'alert' : '');
       UI.voiceStatus.textContent = message;
     }
@@ -2074,7 +2516,7 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
     if (generation !== state.speakerVerificationGeneration) return;
     state.ownerCandidateAt = 0;
     state.speakerMatchHistory = [];
-    state.lastSpeakerDecisionAt = Date.now();
+    state.lastSpeakerDecisionAt = monotonicNow();
     state.lastSpeakerMatched = false;
     state.lastSpeakerNearMatch = false;
     state.lastSpeakerRejected = false;
@@ -2083,36 +2525,43 @@ async function verifyOwnerVoice(samples, sourceSampleRate) {
     UI.voiceStatus.textContent = `声纹验证失败：${error.message}`;
     if (isPreflightAudioActive()) {
       state.preflightSpeakerError = error.message;
-      updatePreflightUi(`声纹验证失败：${error.message}`);
+      await stopPreflightTest({ status: `声纹服务异常，测试已安全停止：${error.message}` });
+    } else if (state.active) {
+      await resetSessionAfterFlowFailure(error);
+      setChip(UI.voiceState, '声纹服务异常', 'alert');
+      UI.voiceStatus.textContent = `检测已安全停止：${error.message}`;
+      UI.sessionState.textContent = '检测已安全停止';
+      addLog('声纹服务异常，本次学习已安全停止，未计为违规。');
     }
   } finally {
+    if (verificationTimeout) clearTimeout(verificationTimeout);
     if (generation === state.speakerVerificationGeneration) {
       state.speakerVerificationPending = false;
+      pumpSpeakerVerification(sourceSampleRate);
     }
   }
 }
 
-function onRuntimePcmChunk(chunk) {
-  if (
-    !isReciteDetectionActive()
-    || !state.latestVadSpeech
-  ) return;
-
-  const now = Date.now();
-  if (state.lastSpeechChunkAt && now - state.lastSpeechChunkAt > 650) {
-    state.speakerChunks = [];
-    state.speakerSampleCount = 0;
-  }
-  state.lastSpeechChunkAt = now;
-  state.speakerChunks.push(chunk);
-  state.speakerSampleCount += chunk.length;
-
-  const sampleRate = state.audioContext?.sampleRate || SpeakerAudio.TARGET_SAMPLE_RATE;
+function pumpSpeakerVerification(sourceSampleRate) {
+  if (!isReciteDetectionActive() || state.speakerVerificationPending) return;
+  const sampleRate = sourceSampleRate
+    || state.audioContext?.sampleRate
+    || SpeakerAudio.TARGET_SAMPLE_RATE;
+  const quickLength = Math.round(sampleRate * SPEAKER_QUICK_WINDOW_SECONDS);
   const targetLength = Math.round(sampleRate * SPEAKER_WINDOW_SECONDS);
   if (
+    !state.speakerQuickProbeCompleted
+    && state.speakerSampleCount >= quickLength
+  ) {
+    state.speakerQuickProbeCompleted = true;
+    const quickSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount)
+      .slice(Math.max(0, state.speakerSampleCount - quickLength));
+    verifyOwnerVoice(quickSamples, sampleRate, { quickProbe: true });
+    return;
+  }
+  if (
     state.speakerSampleCount < targetLength
-    || state.speakerVerificationPending
-    || now - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
+    || monotonicNow() - state.lastSpeakerVerificationAt < SPEAKER_VERIFY_INTERVAL_MS
   ) return;
 
   const allSamples = SpeakerAudio.concatChunks(state.speakerChunks, state.speakerSampleCount);
@@ -2124,36 +2573,109 @@ function onRuntimePcmChunk(chunk) {
   verifyOwnerVoice(windowSamples, sampleRate);
 }
 
-function beginNoiseCalibration() {
-  state.vad = new AdaptiveVad.AdaptiveVoiceDetector({
-    calibrationFrames: Math.round((CALIBRATION_SECONDS * 1000) / MICROPHONE_POLL_MS),
-    sensitivityDb: voiceThreshold(),
-  });
-  state.calibrating = true;
-  state.quietDetector = state.mode === 'study'
+function checkMicrophoneHealth() {
+  if (
+    state.microphoneHealthFailurePending
+    || !state.audioStream
+    || !state.audioContext
+    || (!state.active && !state.startPending && !isPreflightAudioActive())
+  ) return;
+  const now = monotonicNow();
+  const pcmStalled = !state.lastPcmAt || now - state.lastPcmAt >= MICROPHONE_PCM_TIMEOUT_MS;
+  const digitallySilent = state.mode === 'study'
+    && state.lastNonZeroPcmAt
+    && now - state.lastNonZeroPcmAt >= MICROPHONE_DIGITAL_SILENCE_TIMEOUT_MS;
+  if (!pcmStalled && !digitallySilent && state.audioContext.state === 'running') return;
+
+  state.microphoneHealthFailurePending = true;
+  const message = digitallySilent
+    ? '麦克风持续没有有效采样，检测已安全停止。'
+    : '麦克风没有继续提供声音，检测已安全停止。';
+  if (isPreflightAudioActive()) {
+    stopPreflightTest({ status: message }).catch(handleAuxiliaryUiError);
+  } else {
+    resetSessionAfterFlowFailure(new Error(message)).then(() => {
+      setChip(UI.voiceState, '麦克风检测已停止', 'alert');
+      UI.voiceStatus.textContent = message;
+      UI.sessionState.textContent = '检测已安全停止';
+    }).catch(handleSessionFlowError);
+  }
+}
+
+function onRuntimePcmChunk(chunk) {
+  const now = monotonicNow();
+  state.lastPcmAt = now;
+  if (chunk.some((sample) => Math.abs(sample) > 1e-7)) state.lastNonZeroPcmAt = now;
+  if (state.mode === 'study') {
+    onStudyPcmChunk(chunk);
+    return;
+  }
+  if (
+    !isReciteDetectionActive()
+    || !state.latestVadSpeech
+  ) return;
+
+  if (state.lastSpeechChunkAt && now - state.lastSpeechChunkAt > 650) {
+    state.speakerChunks = [];
+    state.speakerSampleCount = 0;
+    state.speakerQuickProbeCompleted = false;
+  }
+  state.lastSpeechChunkAt = now;
+  state.speakerChunks.push(chunk);
+  state.speakerSampleCount += chunk.length;
+  pumpSpeakerVerification(state.audioContext?.sampleRate || SpeakerAudio.TARGET_SAMPLE_RATE);
+}
+
+function beginDetectionWarmup() {
+  const directStudyDetection = state.mode === 'study';
+  state.vad = directStudyDetection
+    ? null
+    : new AdaptiveVad.AdaptiveVoiceDetector({
+      calibrationFrames: Math.round((CALIBRATION_SECONDS * 1000) / MICROPHONE_POLL_MS),
+      sensitivityDb: RECITE_AUTO_VOICE_MARGIN_DB,
+    });
+  state.calibrating = !directStudyDetection;
+  state.quietDetector = directStudyDetection
     ? new POLICY.QuietModeDetector({
       violationSeconds: state.settings.studyVoiceSeconds,
-      sensitivityDb: state.settings.studySensitivityDb,
-      frameMs: MICROPHONE_POLL_MS,
+      rearmQuietSeconds: STUDY_RECOVERY_CONFIRM_SECONDS,
+      evidenceGapSeconds: STUDY_RECOVERY_CONFIRM_SECONDS,
+      evidenceOverlapSeconds: STUDY_EVENT_OVERLAP_SECONDS,
+      frameMs: STUDY_EVENT_INTERVAL_MS,
     })
     : null;
   state.latestQuietResult = null;
-  state.silenceArmed = false;
+  state.silenceArmed = directStudyDetection;
   state.silentSince = 0;
   state.previousSpectrum = null;
   resetSpeakerRuntime();
+  resetStudyAudioRuntime();
+  if (directStudyDetection) {
+    document.body.dataset.vadState = 'ready';
+    setChip(UI.voiceState, '正在识别声音');
+    UI.voiceStatus.textContent = '等待首个声音分类结果';
+    if (isPreflightAudioActive()) {
+      updatePreflightUi('声音检测已开始，正在形成首个分类窗口。');
+    } else {
+      enterStudyingPhase();
+    }
+    return;
+  }
   document.body.dataset.vadState = 'calibrating';
-  setChip(UI.voiceState, `校准声音 ${CALIBRATION_SECONDS} 秒`);
-  UI.voiceStatus.textContent = '正在校准环境声音';
-  UI.recalibrateButton.disabled = true;
+  setChip(UI.voiceState, `准备检测 ${CALIBRATION_SECONDS} 秒`);
+  UI.voiceStatus.textContent = '正在自动适应环境声音';
 }
 
 function pollMicrophone() {
   const preflight = isPreflightAudioActive();
-  if ((!state.active && !preflight) || !state.analyser || !state.vad || state.alertOpen || state.silencePausedAt) return;
+  if ((!state.active && !preflight) || !state.analyser || state.alertOpen || state.silencePausedAt) return;
+  if (state.mode === 'recite' && !state.vad) return;
+  try {
   let result;
   try {
-    result = state.vad.process(calculateAudioFeatures());
+    result = state.mode === 'study'
+      ? { levelPercent: calculateAudioLevelPercent() }
+      : state.vad.process(calculateAudioFeatures());
   } catch (error) {
     if (preflight) {
       stopPreflightTest({ status: `测试已停止：${error.message}` }).catch(handleAuxiliaryUiError);
@@ -2165,24 +2687,19 @@ function pollMicrophone() {
   UI.liveVolumeBar.style.width = `${result.levelPercent}%`;
   UI.meter.setAttribute('aria-valuenow', String(result.levelPercent));
   UI.liveMeter.setAttribute('aria-valuenow', String(result.levelPercent));
-  if (Number.isFinite(result.noiseFloorDb)) {
-    state.latestNoiseFloorDb = clamp(result.noiseFloorDb, METER_MIN_DB, METER_MAX_DB);
-  }
-  renderThresholdMarkers();
 
   if (state.calibrating) {
     const remaining = Math.max(0, CALIBRATION_SECONDS * (1 - result.calibrationProgress));
-    setChip(UI.voiceState, result.calibrated ? '校准完成' : `校准声音 ${remaining.toFixed(1)} 秒`);
+    setChip(UI.voiceState, result.calibrated ? '检测就绪' : `准备检测 ${remaining.toFixed(1)} 秒`);
     UI.voiceStatus.textContent = result.calibrated
       ? (state.mode === 'study' ? '当前安静' : '尚未检测到本人声音')
-      : '正在校准环境声音';
+      : '正在自动适应环境声音';
     if (!result.calibrated) return;
     state.calibrating = false;
-    UI.recalibrateButton.disabled = preflight;
     document.body.dataset.vadState = 'ready';
     if (preflight) {
       state.silenceArmed = true;
-      state.silentSince = state.mode === 'recite' ? Date.now() : 0;
+      state.silentSince = state.mode === 'recite' ? monotonicNow() : 0;
       state.quietDetector?.reset();
       updatePreflightUi(state.mode === 'study'
         ? '校准完成，请按平时的方式安静学习。'
@@ -2197,35 +2714,9 @@ function pollMicrophone() {
 
   if (state.mode === 'study') {
     if (!state.silenceArmed || !state.quietDetector) return;
-    const quietResult = state.quietDetector.process(result, MICROPHONE_POLL_MS);
-    state.latestQuietResult = quietResult;
-    document.body.dataset.voiceDetected = String(quietResult.evidence);
-    if (preflight && quietResult.violated) state.preflightThresholdReached = true;
-    else if (preflight && quietResult.rearmed) state.preflightThresholdReached = false;
-    if (preflight && state.preflightThresholdReached) {
-      setChip(UI.voiceState, '已达到提醒条件', 'alert');
-      UI.voiceStatus.textContent = '已达到提醒条件';
-    } else if (quietResult.evidence) {
-      const seconds = (quietResult.suspectedSpeechMs / 1_000).toFixed(1);
-      setChip(UI.voiceState, `疑似持续说话 ${seconds} 秒`, 'alert');
-      UI.voiceStatus.textContent = `疑似持续说话 ${seconds} 秒`;
-    } else if (!quietResult.armed) {
-      setChip(UI.voiceState, '等待恢复安静');
-      UI.voiceStatus.textContent = '保持安静后继续检测';
-    } else {
-      setChip(UI.voiceState, '安静', 'good');
-      UI.voiceStatus.textContent = '当前安静';
-    }
-    if (preflight) {
-      if (state.preflightThresholdReached) {
-        updatePreflightUi('按当前设置将触发提醒。');
-      } else if (quietResult.evidence) {
-        updatePreflightUi(`已连续检测到人声 ${(quietResult.suspectedSpeechMs / 1_000).toFixed(1)} 秒。`);
-      } else {
-        updatePreflightUi('当前没有达到提醒条件。');
-      }
-    } else if (quietResult.violated) {
-      raiseSilenceAlert();
+    if (!state.latestQuietResult && !state.studyAudioClassificationPending) {
+      setChip(UI.voiceState, '正在识别环境声音');
+      UI.voiceStatus.textContent = '正在识别环境声音';
     }
     return;
   }
@@ -2237,7 +2728,7 @@ function pollMicrophone() {
     updatePreflightUi(`声纹验证失败：${state.preflightSpeakerError}`);
     return;
   }
-  const now = Date.now();
+  const now = monotonicNow();
   const ownerConfirmed = result.isSpeech && now < state.ownerConfirmedUntil;
   if (ownerConfirmed) {
     document.body.dataset.voiceDetected = 'true';
@@ -2259,7 +2750,7 @@ function pollMicrophone() {
       setChip(UI.voiceState, '正在复核本人声音');
       UI.voiceStatus.textContent = '正在复核本人声音';
     } else if (state.lastSpeakerDecisionAt && now - state.lastSpeakerDecisionAt < 1_800 && !state.lastSpeakerMatched) {
-      const message = state.lastSpeakerRejected ? '暂未确认本人声音' : '正在复核本人声音';
+      const message = state.lastSpeakerRejected ? rejectedSpeakerStatus(now) : '正在复核本人声音';
       setChip(UI.voiceState, message, state.lastSpeakerRejected ? 'alert' : '');
       UI.voiceStatus.textContent = message;
     } else {
@@ -2269,19 +2760,29 @@ function pollMicrophone() {
   }
 
   if (!state.silenceArmed) return;
-  if (!state.silentSince) state.silentSince = Date.now();
-  const silentForMs = Date.now() - state.silentSince;
+  if (!state.silentSince) state.silentSince = monotonicNow();
+  const silentForMs = monotonicNow() - state.silentSince;
   const silentFor = Math.floor(silentForMs / 1000);
+  const silenceViolated = silentForMs >= violationLimitMs();
   if (!result.isSpeech) {
-    setChip(UI.voiceState, `本人未出声 ${silentFor} 秒`, silentForMs >= violationLimitMs() ? 'alert' : '');
-    UI.voiceStatus.textContent = `本人未出声 ${silentFor} 秒`;
+    const message = silenceViolated
+      ? `本人未出声 ${silentFor} 秒`
+      : '暂未检测到本人声音';
+    setChip(UI.voiceState, message, silenceViolated ? 'alert' : '');
+    UI.voiceStatus.textContent = message;
   }
-  if (silentForMs >= violationLimitMs()) {
+  if (silenceViolated) {
+    if (state.speakerVerificationPending) {
+      if (preflight) {
+        state.preflightThresholdReached = false;
+        updatePreflightUi('达到设定时间，正在等待本次声纹确认。');
+      }
+      return;
+    }
     const graceDeadline = state.silentSince + violationLimitMs() + SPEAKER_DEADLINE_GRACE_MS;
     const verificationInFlight = result.isSpeech
-      || state.speakerVerificationPending
       || state.speakerSampleCount > 0;
-    if (verificationInFlight && Date.now() < graceDeadline) {
+    if (verificationInFlight && monotonicNow() < graceDeadline) {
       if (preflight) {
         state.preflightThresholdReached = false;
         updatePreflightUi('达到设定时间，正在等待本次声纹确认。');
@@ -2299,6 +2800,9 @@ function pollMicrophone() {
     updatePreflightUi(result.isSpeech
       ? '检测到声音，正在确认是否为本人。'
       : `本人未出声 ${silentFor} 秒，当前阈值 ${violationLimitSeconds()} 秒。`);
+  }
+  } finally {
+    if (animationWatchPresentationActive()) showAnimationWatchState();
   }
 }
 
@@ -2359,6 +2863,16 @@ async function startSession() {
       return;
     }
   }
+  if (state.mode === 'study' && !state.audioEventReady) {
+    await refreshAudioEventState();
+    if (!state.audioEventReady) {
+      state.startPending = false;
+      updateModeUi();
+      updateSpeakerProfileUi();
+      UI.voiceStatus.textContent = state.audioEventError || '声音分类模型不可用';
+      return;
+    }
+  }
   UI.startButton.disabled = true;
   UI.startButton.textContent = '正在启动麦克风…';
   try {
@@ -2376,7 +2890,7 @@ async function startSession() {
     state.alertOpen = false;
     state.alerts = 0;
     state.lives = RULES.MAX_LIVES;
-    state.studyClock = new POLICY.EffectiveStudyClock();
+    state.studyClock = new POLICY.EffectiveStudyClock({ now: monotonicNow });
     state.milestoneLedger = new POLICY.MilestoneLedger(state.mode);
     state.earnedPraiseMarks = 0;
     state.praisedMark = 0;
@@ -2389,8 +2903,7 @@ async function startSession() {
     UI.alertCount.textContent = '0 次提醒';
     UI.startButton.textContent = '学习进行中';
     UI.stopButton.disabled = false;
-    UI.backgroundButton.disabled = false;
-    UI.recalibrateButton.disabled = true;
+    setBackgroundControlDisabled(false);
     UI.previewClipButton.disabled = true;
     updateSpeakerProfileUi();
     updateModeUi();
@@ -2411,8 +2924,12 @@ async function startSession() {
 function applyWindowMode(mode) {
   state.windowMode = mode;
   document.body.dataset.windowMode = mode;
-  if (mode === 'hidden' && (state.preflightTesting || state.preflightStarting)) {
-    stopPreflightTest({ status: '窗口已隐藏，测试已停止。' }).catch(handleAuxiliaryUiError);
+  if (mode !== 'floating') document.body.classList.remove('floating-hovered');
+  if ((mode === 'hidden' || mode === 'floating') && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+  }
+  if ((mode === 'hidden' || mode === 'floating') && (state.preflightTesting || state.preflightStarting)) {
+    stopPreflightTest({ status: '窗口已转入后台，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
 }
 
@@ -2428,10 +2945,29 @@ async function toggleWindowMaximize() {
   setWindowMaximizedControl(runtime?.maximized);
 }
 
-async function hideWindowFromChrome() {
-  await stopPreflightTest({ status: '窗口已隐藏，测试已停止。' });
-  addLog('隐藏到后台。');
-  await window.desktopAPI.hideToBackground();
+async function hideWindowFromChrome(forceMode = null) {
+  await stopPreflightTest({ status: '窗口已转入后台，测试已停止。' });
+  const enrollmentCancellation = state.enrollmentOpen
+    ? closeSpeakerEnrollment({ cancel: true })
+    : Promise.resolve();
+  const requestedMode = state.sessionPhase === 'resting' ? 'hidden' : (forceMode || (
+    state.active
+      ? state.settings.backgroundMode
+      : 'hidden'
+  ));
+  addLog(requestedMode === 'floating' ? '显示漂浮窗。' : '完全隐藏到后台。');
+  await window.desktopAPI.hideToBackground(requestedMode);
+  await enrollmentCancellation.catch(handleAuxiliaryUiError);
+}
+
+async function chooseBackgroundModeAndHide(mode) {
+  setBackgroundActionExpanded(false);
+  try {
+    await setBackgroundMode(mode);
+  } catch (error) {
+    handleAuxiliaryUiError(error);
+  }
+  await hideWindowFromChrome(mode);
 }
 
 function handleSceneError(error) {
@@ -2442,6 +2978,23 @@ function handleSceneError(error) {
 
 function handleAuxiliaryUiError(error) {
   console.error('辅助窗口操作失败：', error);
+}
+
+async function handleSystemInterruption() {
+  if (state.systemInterruptionPending) return;
+  state.systemInterruptionPending = true;
+  try {
+    if (state.enrollmentOpen) await closeSpeakerEnrollment({ cancel: true });
+    await stopPreflightTest({ status: '系统状态变化，测试已停止。' });
+    if (state.active || state.startPending || state.sceneRunning || state.sessionPhase === 'resting') {
+      await stopSession(false, true);
+      setChip(UI.voiceState, '学习已停止');
+      UI.voiceStatus.textContent = '电脑休眠或锁定后，请重新开始学习。';
+      UI.sessionState.textContent = '学习已停止';
+    }
+  } finally {
+    state.systemInterruptionPending = false;
+  }
 }
 
 async function resetSessionAfterFlowFailure(flowError) {
@@ -2476,17 +3029,9 @@ async function resetSessionAfterFlowFailure(flowError) {
     hideOverlay();
     await window.desktop.hideBreakPrompt().catch(handleAuxiliaryUiError);
 
-    let mainWindowRestored = false;
-    await window.desktopAPI.finishInlineAlert({ returnToHidden: false }).then(() => {
-      mainWindowRestored = true;
-    }).catch((error) => {
-      console.error('异常流程中结束提醒窗口模式失败：', error);
+    await window.desktopAPI.forceRestoreSceneMode().catch((error) => {
+      console.error('异常流程中恢复主窗口失败：', error);
     });
-    if (!mainWindowRestored) {
-      await window.desktopAPI.restoreSceneMode().catch((error) => {
-        console.error('异常流程中恢复主窗口失败：', error);
-      });
-    }
     await showIdleScene().catch((error) => {
       console.error('异常流程中恢复待命画面失败：', error);
     });
@@ -2520,9 +3065,7 @@ function handleSessionFlowError(error, { voiceMessage = '' } = {}) {
     state.sessionFailureCleanupPending = false;
     hideOverlay();
     window.desktop.hideBreakPrompt().catch(handleAuxiliaryUiError);
-    window.desktopAPI.finishInlineAlert({ returnToHidden: false }).catch(() => (
-      window.desktopAPI.restoreSceneMode().catch(() => {})
-    ));
+    window.desktopAPI.forceRestoreSceneMode().catch(() => {});
     setStoppedControls('待命');
     UI.sceneStatus.hidden = false;
     UI.sceneStatus.textContent = `学习已安全停止：${error.message}`;
@@ -2530,14 +3073,66 @@ function handleSessionFlowError(error, { voiceMessage = '' } = {}) {
   });
 }
 
-UI.startButton.addEventListener('click', startSession);
-UI.stopButton.addEventListener('click', () => stopSession());
+UI.startButton.addEventListener('click', () => startSession().catch(handleSessionFlowError));
+UI.stopButton.addEventListener('click', () => stopSession().catch(handleSessionFlowError));
 UI.breakButton.addEventListener('click', () => startBreak().catch(handleSessionFlowError));
 UI.reciteModeButton.addEventListener('click', () => setMode('recite'));
 UI.studyModeButton.addEventListener('click', () => setMode('study'));
-UI.backgroundButton.addEventListener('click', async () => {
-  await hideWindowFromChrome();
+UI.backgroundButton.addEventListener('click', () => {
+  setBackgroundActionExpanded(false);
+  hideWindowFromChrome().catch(handleAuxiliaryUiError);
 });
+UI.backgroundAction.addEventListener('pointerenter', () => setBackgroundActionExpanded(true));
+UI.backgroundAction.addEventListener('pointerleave', () => setBackgroundActionExpanded(false));
+UI.backgroundAction.addEventListener('focusin', () => setBackgroundActionExpanded(true));
+UI.backgroundAction.addEventListener('focusout', () => {
+  window.requestAnimationFrame(() => {
+    if (!UI.backgroundAction.contains(document.activeElement)) setBackgroundActionExpanded(false);
+  });
+});
+UI.backgroundAction.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  event.preventDefault();
+  UI.backgroundButton.focus();
+  setBackgroundActionExpanded(false);
+});
+UI.backgroundChoiceHidden.addEventListener('click', () => {
+  chooseBackgroundModeAndHide('hidden').catch(handleAuxiliaryUiError);
+});
+UI.backgroundChoiceFloating.addEventListener('click', () => {
+  chooseBackgroundModeAndHide('floating').catch(handleAuxiliaryUiError);
+});
+UI.backgroundModeHidden.addEventListener('click', () => {
+  setBackgroundMode('hidden').catch(handleAuxiliaryUiError);
+});
+UI.backgroundModeFloating.addEventListener('click', () => {
+  setBackgroundMode('floating').catch(handleAuxiliaryUiError);
+});
+function bindFloatingAction(button, action) {
+  let lastNativePointerDownAt = Number.NEGATIVE_INFINITY;
+  const run = () => Promise.resolve(action()).catch(handleAuxiliaryUiError);
+
+  // A native draggable region can swallow the final synthetic click even when
+  // pointerdown reached the button.  Act on the first native button event and
+  // suppress the matching follow-up click; keyboard activation still uses
+  // click and remains supported.
+  button.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    lastNativePointerDownAt = performance.now();
+    run();
+  });
+  button.addEventListener('click', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (performance.now() - lastNativePointerDownAt < 750) return;
+    run();
+  });
+}
+
+bindFloatingAction(UI.floatingHideButton, () => hideWindowFromChrome('hidden'));
+bindFloatingAction(UI.floatingExpandButton, () => window.desktopAPI.restoreSceneMode());
 UI.windowMinimizeButton.addEventListener('click', () => {
   window.desktopAPI.minimizeWindow().catch(handleAuxiliaryUiError);
 });
@@ -2558,8 +3153,12 @@ UI.controlsButton.addEventListener('click', () => {
 UI.exitButton.addEventListener('click', async () => {
   try {
     await stopPreflightTest({ status: '正在退出，测试已停止。' });
+    await Promise.race([
+      studySettingsSaveChain,
+      new Promise((resolve) => window.setTimeout(resolve, QUIT_SETTINGS_FLUSH_TIMEOUT_MS)),
+    ]);
   } finally {
-    window.desktopAPI.quitApp();
+    window.desktopAPI.quitApp().catch(handleAuxiliaryUiError);
   }
 });
 UI.preflightTestButton.addEventListener('click', () => {
@@ -2567,9 +3166,6 @@ UI.preflightTestButton.addEventListener('click', () => {
     stopPreflightTest({ status: `测试已停止：${error.message}` }).catch(handleAuxiliaryUiError);
   });
 });
-bindThresholdMarker(UI.thresholdMarker, UI.meter);
-bindThresholdMarker(UI.liveThresholdMarker, UI.liveMeter);
-UI.voiceThreshold.addEventListener('input', updateThreshold);
 UI.refreshMicrophonesButton.addEventListener('click', () => {
   refreshMicrophones({ requestPermission: true }).catch((error) => {
     UI.microphoneStatus.textContent = `无法刷新麦克风：${error.message}`;
@@ -2578,6 +3174,8 @@ UI.refreshMicrophonesButton.addEventListener('click', () => {
 UI.microphoneSelect.addEventListener('change', () => {
   if (microphoneSelectionLocked()) return;
   state.settings.microphoneDeviceId = UI.microphoneSelect.value;
+  const selected = selectedMicrophone();
+  state.settings.microphoneDeviceLabel = selected?.label?.slice(0, 160) || '';
   saveSettings();
   renderMicrophoneUi();
   updatePreflightUi('麦克风已切换，可按当前设置重新测试。');
@@ -2586,7 +3184,7 @@ UI.silenceLimit.addEventListener('input', () => {
   const previousSeconds = state.settings.reciteSilenceSeconds;
   state.settings.reciteSilenceSeconds = POLICY.normalizeViolationSeconds('recite', UI.silenceLimit.value);
   UI.silenceLimitValue.textContent = `${state.settings.reciteSilenceSeconds} 秒`;
-  if (state.settings.reciteSilenceSeconds !== previousSeconds) resetPreflightDetectionAfterSettingChange();
+  if (state.settings.reciteSilenceSeconds !== previousSeconds) resetDetectionAfterSettingChange();
   saveSettings();
 });
 UI.studyVoiceLimit.addEventListener('input', () => {
@@ -2594,38 +3192,80 @@ UI.studyVoiceLimit.addEventListener('input', () => {
   state.settings.studyVoiceSeconds = POLICY.normalizeViolationSeconds('study', UI.studyVoiceLimit.value);
   UI.studyVoiceLimitValue.textContent = `${state.settings.studyVoiceSeconds} 秒`;
   state.quietDetector?.setViolationSeconds(state.settings.studyVoiceSeconds);
-  if (state.settings.studyVoiceSeconds !== previousSeconds) resetPreflightDetectionAfterSettingChange();
+  if (state.settings.studyVoiceSeconds !== previousSeconds) resetDetectionAfterSettingChange();
   saveSettings();
 });
-UI.speakerEnrollButton.addEventListener('click', () => openSpeakerEnrollment());
-UI.speakerDeleteButton.addEventListener('click', () => deleteSpeakerProfile());
-UI.enrollmentMicButton.addEventListener('click', () => runEnrollmentMicrophone());
-UI.enrollmentCancelButton.addEventListener('click', () => closeSpeakerEnrollment({ cancel: true }));
-UI.previewClipButton.addEventListener('click', previewSelectedClip);
-UI.recalibrateButton.addEventListener('click', () => {
-  if (!state.active || state.sessionPhase !== 'studying') return;
-  state.sessionPhase = 'resuming';
-  state.studyClock.pause();
-  clearPatrolTimer();
-  UI.sessionState.textContent = '校准声音中';
-  beginNoiseCalibration();
-  addLog('重新校准声音。');
+UI.speakerEnrollButton.addEventListener('click', () => {
+  openSpeakerEnrollment().catch((error) => {
+    UI.voiceStatus.textContent = `无法打开声纹录入：${error.message}`;
+  });
 });
-UI.inlineAlertDismiss.addEventListener('click', () => finishPreview());
-UI.inlineAlertStop.addEventListener('click', () => stopSession());
+UI.speakerDeleteButton.addEventListener('click', () => {
+  deleteSpeakerProfile().catch(handleAuxiliaryUiError);
+});
+UI.enrollmentMicButton.addEventListener('click', () => {
+  runEnrollmentMicrophone().catch(handleAuxiliaryUiError);
+});
+UI.enrollmentCancelButton.addEventListener('click', () => {
+  closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+});
+UI.previewClipButton.addEventListener('click', () => {
+  previewSelectedClip().catch(handleAuxiliaryUiError);
+});
+UI.inlineAlertDismiss.addEventListener('click', () => {
+  finishPreview().catch(handleAuxiliaryUiError);
+});
+UI.inlineAlertStop.addEventListener('click', () => {
+  stopSession().catch(handleSessionFlowError);
+});
 window.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && state.presentation) finishPreview();
-  else if (event.key === 'Escape' && state.enrollmentOpen && !state.enrollmentBusy) {
-    closeSpeakerEnrollment({ cancel: true });
+  if (event.key === 'Escape' && state.presentation) {
+    finishPreview().catch(handleAuxiliaryUiError);
+  }
+  else if (event.key === 'Escape' && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
   }
 });
-window.desktopAPI.onWindowModeChanged(({ mode, minimized = false }) => {
+window.desktopAPI.onWindowModeChanged(({ mode, minimized = false, transitionId = 0 }) => {
   applyWindowMode(mode);
+  if (Number.isSafeInteger(transitionId) && transitionId > 0) {
+    let acknowledged = false;
+    const acknowledge = () => {
+      if (acknowledged) return;
+      acknowledged = true;
+      window.desktopAPI.acknowledgeWindowMode({ transitionId, mode }).catch(handleAuxiliaryUiError);
+    };
+    const fallback = window.setTimeout(() => {
+      void document.body.offsetWidth;
+      acknowledge();
+    }, 80);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        window.clearTimeout(fallback);
+        acknowledge();
+      });
+    });
+  }
   if (minimized && (state.preflightTesting || state.preflightStarting)) {
     stopPreflightTest({ status: '窗口已最小化，测试已停止。' }).catch(handleAuxiliaryUiError);
   }
+  if (minimized && state.enrollmentOpen) {
+    closeSpeakerEnrollment({ cancel: true }).catch(handleAuxiliaryUiError);
+  }
+});
+window.desktopAPI.onFloatingHoverChanged((payload) => {
+  document.body.classList.toggle(
+    'floating-hovered',
+    state.windowMode === 'floating' && payload?.hovered === true,
+  );
 });
 window.desktopAPI.onWindowMaximizedChanged(({ maximized }) => setWindowMaximizedControl(maximized));
+window.desktopAPI.onWindowCloseRequested(() => {
+  hideWindowFromChrome().catch(handleAuxiliaryUiError);
+});
+window.desktopAPI.onSystemInterruption(() => {
+  handleSystemInterruption().catch(handleSessionFlowError);
+});
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener('devicechange', () => {
     if (!microphoneSelectionLocked()) refreshMicrophones().catch(() => {});
@@ -2640,12 +3280,20 @@ window.desktop.onBreakPromptAction((action) => {
   else if (action === 'bank') bankBreakPrompt().catch(handleAuxiliaryUiError);
 });
 window.addEventListener('pagehide', () => {
+  if (state.enrollmentOpen) {
+    const enrollmentId = state.enrollmentId;
+    state.enrollmentGeneration += 1;
+    state.enrollmentCaptureCancel?.();
+    state.enrollmentCaptureCancel = null;
+    state.enrollmentId = null;
+    if (enrollmentId) window.desktopAPI.cancelSpeakerEnrollment(enrollmentId).catch(() => {});
+  }
   if (state.preflightTesting || state.preflightStarting || state.preflightStopping) {
     stopPreflightTest({ status: '测试已停止。' }).catch(() => {});
   }
 });
 
-window.__beishuTest = Object.freeze({
+if (window.desktopAPI.testHooksEnabled) window.__beishuTest = Object.freeze({
   rules: RULES,
   setRandomValues(values) {
     state.randomValues = Array.isArray(values) ? [...values] : [];
@@ -2684,10 +3332,17 @@ window.__beishuTest = Object.freeze({
       praisedMark: state.praisedMark,
       reciteSilenceSeconds: state.settings.reciteSilenceSeconds,
       studyVoiceSeconds: state.settings.studyVoiceSeconds,
-      reciteSensitivityDb: state.settings.reciteSensitivityDb,
-      studySensitivityDb: state.settings.studySensitivityDb,
-      latestNoiseFloorDb: state.latestNoiseFloorDb,
+      reciteUsesAutomaticVoiceGate: true,
+      reciteAutoVoiceMarginDb: RECITE_AUTO_VOICE_MARGIN_DB,
+      backgroundMode: state.settings.backgroundMode,
+      floatingTimer: UI.floatingTimer.textContent,
+      studyUsesDirectClassification: true,
       quietDetector: state.quietDetector?.snapshot() || null,
+      audioEventReady: state.audioEventReady,
+      audioEventError: state.audioEventError,
+      studyAudioClassificationPending: state.studyAudioClassificationPending,
+      latestStudyAudioDecision: state.latestStudyAudioDecision,
+      microphoneProcessingWarning: state.microphoneProcessingWarning,
       speakerReady: state.speakerReady,
       speakerProfileExists: state.speakerProfileExists,
       enrollmentPending: state.enrollmentPending,
@@ -2725,10 +3380,12 @@ window.__beishuTest = Object.freeze({
   },
   setEffectiveElapsedMs(value) {
     const elapsedMs = Math.max(0, Number(value) || 0);
-    state.studyClock = new POLICY.EffectiveStudyClock({ elapsedMs });
+    state.studyClock = new POLICY.EffectiveStudyClock({ elapsedMs, now: monotonicNow });
     if (state.sessionPhase === 'studying') state.studyClock.resume();
     settleStudyMilestones();
-    UI.timer.textContent = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    const elapsed = formatTime(Math.floor(effectiveElapsedMs() / 1_000));
+    UI.timer.textContent = elapsed;
+    UI.floatingTimer.textContent = `已学习 ${elapsed}`;
     return effectiveElapsedMs();
   },
   startBreak(durationMs = 1_000) {
@@ -2736,7 +3393,7 @@ window.__beishuTest = Object.freeze({
   },
   completeBreak() {
     if (state.sessionPhase !== 'resting') return false;
-    state.restDeadline = Date.now();
+    state.restDeadline = monotonicNow();
     tickBreak(state.restGeneration);
     return true;
   },
@@ -2746,21 +3403,35 @@ window.__beishuTest = Object.freeze({
 });
 
 async function initialize() {
-  loadSettings();
+  await loadSettings();
+  const backgroundPreference = await window.desktopAPI.getBackgroundPreference().catch(() => null);
+  if (backgroundPreference) {
+    state.settings.backgroundMode = backgroundPreference.backgroundMode === 'floating'
+      ? 'floating'
+      : 'hidden';
+  }
   await refreshMicrophones().catch(() => {});
   updateModeUi();
   state.scenePlayer = new DisciplineMediaPlayer(UI.sceneCanvas, { statusElement: UI.sceneStatus });
   await loadMediaCatalog();
   await showIdleScene();
-  await refreshSpeakerState();
+  await Promise.all([refreshSpeakerState(), refreshAudioEventState()]);
   const runtime = await window.desktopAPI.getRuntimeWindowState().catch(() => null);
   setWindowMaximizedControl(runtime?.maximized);
+  if (runtime?.mode) applyWindowMode(runtime.mode);
+  document.body.classList.toggle(
+    'floating-hovered',
+    runtime?.mode === 'floating' && runtime?.floatingHovered === true,
+  );
   updateModeUi();
   if (state.mode === 'recite' && state.speakerReady && !state.speakerProfileExists) {
     setChip(UI.voiceState, '需要录入本人声纹');
     UI.voiceStatus.textContent = state.speakerProfileError
       ? `${state.speakerProfileError} 请重新录入一次。`
       : '开始学习前先录入本人声音';
+  } else if (state.mode === 'study' && !state.audioEventReady) {
+    setChip(UI.voiceState, '声音分类不可用', 'alert');
+    UI.voiceStatus.textContent = state.audioEventError || '本地声音分类模型不可用';
   } else if (state.mode === 'study') {
     setChip(UI.voiceState, '等待安静自习');
     UI.voiceStatus.textContent = '未在检测声音';

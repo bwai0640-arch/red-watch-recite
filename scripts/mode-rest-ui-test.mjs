@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const electronExecutable = path.join(projectRoot, 'node_modules', 'electron', 'dist', 'electron.exe');
 const workRoot = path.join(projectRoot, 'work');
+const rendererAppSource = fs.readFileSync(path.join(projectRoot, 'renderer', 'app.js'), 'utf8');
 
 if (!fs.existsSync(electronExecutable)) {
   throw new Error(`Source Electron runtime not found: ${electronExecutable}`);
@@ -31,6 +32,23 @@ const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mill
 function assert(condition, message) {
   if (!condition) throw new Error(message);
 }
+
+const loadSettingsSource = rendererAppSource.match(
+  /async function loadSettings\(\) \{[\s\S]*?\n\}\n\nlet studySettingsSaveChain/,
+)?.[0] || '';
+assert(loadSettingsSource.includes('window.desktopAPI.getStudySettings()'),
+  'Renderer settings no longer load through the durable desktop API');
+assert(loadSettingsSource.includes('if (!durable?.exists)'),
+  'Legacy browser settings are not restricted to first durable migration');
+assert(loadSettingsSource.includes("localStorage.getItem(LEGACY_SETTINGS_STORAGE_KEY)"),
+  'Legacy browser settings are no longer read during first migration');
+assert(loadSettingsSource.includes('window.desktopAPI.setStudySettings(settings)'),
+  'Legacy browser settings are not written through the validated desktop API');
+assert(loadSettingsSource.indexOf('window.desktopAPI.setStudySettings(settings)')
+  < loadSettingsSource.indexOf('localStorage.removeItem(LEGACY_SETTINGS_STORAGE_KEY)'),
+  'Legacy browser settings are deleted before their one-time durable migration completes');
+assert(!rendererAppSource.includes('localStorage.setItem('),
+  'Renderer still treats browser localStorage as current settings persistence');
 
 function assertArray(actual, expected, message) {
   assert(JSON.stringify(actual) === JSON.stringify(expected), `${message}: ${JSON.stringify(actual)}`);
@@ -354,6 +372,30 @@ async function completePreflightCalibration(client) {
   );
 }
 
+async function waitForDirectStudyDetection(client, { preflight = false } = {}) {
+  return waitForEvaluation(
+    client,
+    `({
+      snapshot: window.__beishuTest.getSnapshot(),
+      vadState: document.body.dataset.vadState,
+      hasVad: Boolean(state.vad),
+      silenceArmed: state.silenceArmed
+    })`,
+    (value) => value.snapshot.mode === 'study'
+      && value.vadState === 'ready'
+      && !value.snapshot.calibrating
+      && !value.hasVad
+      && value.silenceArmed
+      && (preflight
+        ? value.snapshot.preflightTesting
+          && !value.snapshot.active
+          && value.snapshot.sessionPhase === 'idle'
+        : value.snapshot.active
+          && value.snapshot.introComplete
+          && value.snapshot.sessionPhase === 'studying'),
+  );
+}
+
 function waitForProcessExit(child, timeout = 10_000) {
   if (child.exitCode !== null) return Promise.resolve(child.exitCode);
   return new Promise((resolve, reject) => {
@@ -383,11 +425,358 @@ async function removeIsolatedRoot(testRoot) {
   }
 }
 
+function runEncodedPowerShell(script, timeout = 15_000) {
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+      {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`System cursor helper timed out after ${timeout} ms`));
+    }, timeout);
+    child.once('error', (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      reject(error);
+    });
+    child.once('exit', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutId);
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+      reject(new Error(`System cursor helper failed (${code}): ${stderr.trim()}`));
+    });
+  });
+}
+
+async function moveSystemCursorRelativeToProcessWindow(processId, placement) {
+  assert(Number.isInteger(processId) && processId > 0, 'Invalid source process id');
+  assert(placement === 'inside' || placement === 'outside', 'Invalid native cursor placement');
+  const output = await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public static class BeishuNativeCursor {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
+  }
+
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  private static uint targetProcessId;
+  private static readonly List<IntPtr> visibleWindows = new List<IntPtr>();
+  private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetCursorPos(out POINT point);
+
+  [DllImport("user32.dll")]
+  private static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+  [DllImport("user32.dll")]
+  private static extern int GetSystemMetrics(int index);
+
+  public static POINT Move(uint processId, bool inside) {
+    if (SetThreadDpiAwarenessContext(PerMonitorAwareV2) == IntPtr.Zero) {
+      throw new InvalidOperationException("Unable to enter a per-monitor DPI-aware coordinate context.");
+    }
+    targetProcessId = processId;
+    visibleWindows.Clear();
+    EnumWindows(InspectWindow, IntPtr.Zero);
+    if (visibleWindows.Count != 1) {
+      throw new InvalidOperationException(
+        "Expected exactly one visible top-level source window, found " + visibleWindows.Count + "."
+      );
+    }
+    POINT before;
+    RECT rect;
+    if (!GetCursorPos(out before) || !GetWindowRect(visibleWindows[0], out rect)) {
+      throw new InvalidOperationException("Unable to inspect native cursor or window bounds.");
+    }
+    int x;
+    int y;
+    if (inside) {
+      x = rect.Left + ((rect.Right - rect.Left) / 2);
+      y = rect.Top + ((rect.Bottom - rect.Top) / 2);
+    } else {
+      POINT[] candidates = OutsideCandidates(rect);
+      bool found = false;
+      x = 0;
+      y = 0;
+      foreach (POINT candidate in candidates) {
+        if (InsideVirtualDesktop(candidate) && !InsideRect(candidate, rect)) {
+          x = candidate.X;
+          y = candidate.Y;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        throw new InvalidOperationException("Unable to choose a cursor point outside the source window.");
+      }
+    }
+    if (!SetCursorPos(x, y)) {
+      throw new InvalidOperationException("Unable to move the native cursor.");
+    }
+    return before;
+  }
+
+  private static bool InspectWindow(IntPtr hWnd, IntPtr lParam) {
+    uint processId;
+    RECT rect;
+    GetWindowThreadProcessId(hWnd, out processId);
+    if (processId != targetProcessId || !IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out rect)) {
+      return true;
+    }
+    long width = Math.Max(0, rect.Right - rect.Left);
+    long height = Math.Max(0, rect.Bottom - rect.Top);
+    if (width > 0 && height > 0) visibleWindows.Add(hWnd);
+    return true;
+  }
+
+  private static POINT[] OutsideCandidates(RECT rect) {
+    int centerX = rect.Left + ((rect.Right - rect.Left) / 2);
+    int centerY = rect.Top + ((rect.Bottom - rect.Top) / 2);
+    return new POINT[] {
+      new POINT { X = rect.Left - 32, Y = centerY },
+      new POINT { X = rect.Right + 32, Y = centerY },
+      new POINT { X = centerX, Y = rect.Top - 32 },
+      new POINT { X = centerX, Y = rect.Bottom + 32 }
+    };
+  }
+
+  private static bool InsideRect(POINT point, RECT rect) {
+    return point.X >= rect.Left && point.X < rect.Right
+      && point.Y >= rect.Top && point.Y < rect.Bottom;
+  }
+
+  private static bool InsideVirtualDesktop(POINT point) {
+    const int SmXVirtualScreen = 76;
+    const int SmYVirtualScreen = 77;
+    const int SmCxVirtualScreen = 78;
+    const int SmCyVirtualScreen = 79;
+    int left = GetSystemMetrics(SmXVirtualScreen);
+    int top = GetSystemMetrics(SmYVirtualScreen);
+    int right = left + GetSystemMetrics(SmCxVirtualScreen);
+    int bottom = top + GetSystemMetrics(SmCyVirtualScreen);
+    return point.X >= left && point.X < right && point.Y >= top && point.Y < bottom;
+  }
+}
+'@
+$before = [BeishuNativeCursor]::Move([uint32]${processId}, [bool]::Parse('${placement === 'inside'}'))
+Write-Output ($before.X.ToString() + "," + $before.Y.ToString())
+`);
+  const match = output.match(/(-?\d+),(-?\d+)\s*$/);
+  assert(match, `Unexpected native cursor helper output: ${output}`);
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+async function getSystemCursorPosition() {
+  const output = await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class BeishuCursorSnapshot {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct POINT {
+    public int X;
+    public int Y;
+  }
+
+  [DllImport("user32.dll")]
+  public static extern bool GetCursorPos(out POINT point);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+}
+'@
+if ([BeishuCursorSnapshot]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) {
+  throw "Unable to enter a per-monitor DPI-aware coordinate context."
+}
+$point = New-Object BeishuCursorSnapshot+POINT
+if (-not [BeishuCursorSnapshot]::GetCursorPos([ref]$point)) {
+  throw "Unable to capture the native cursor."
+}
+Write-Output ($point.X.ToString() + "," + $point.Y.ToString())
+`);
+  const match = output.match(/(-?\d+),(-?\d+)\s*$/);
+  assert(match, `Unexpected native cursor snapshot output: ${output}`);
+  return { x: Number(match[1]), y: Number(match[2]) };
+}
+
+async function restoreSystemCursor(point) {
+  if (!point) return;
+  await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class BeishuCursorRestore {
+  [DllImport("user32.dll")]
+  public static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+}
+'@
+if ([BeishuCursorRestore]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) {
+  throw "Unable to enter a per-monitor DPI-aware coordinate context."
+}
+if (-not [BeishuCursorRestore]::SetCursorPos(${Math.round(point.x)}, ${Math.round(point.y)})) {
+  throw "Unable to restore the native cursor."
+}
+`);
+}
+
+async function clickProcessWindowAtFraction(processId, point) {
+  assert(Number.isInteger(processId) && processId > 0, 'Invalid source process id');
+  assert(
+    Number.isFinite(point?.x) && point.x > 0 && point.x < 1
+      && Number.isFinite(point?.y) && point.y > 0 && point.y < 1,
+    `Invalid native click fraction: ${JSON.stringify(point)}`,
+  );
+  const xMillionths = Math.round(point.x * 1_000_000);
+  const yMillionths = Math.round(point.y * 1_000_000);
+  await runEncodedPowerShell(`
+Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Threading;
+
+public static class BeishuNativeClick {
+  [StructLayout(LayoutKind.Sequential)]
+  private struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+
+  private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  private static uint targetProcessId;
+  private static readonly List<IntPtr> visibleWindows = new List<IntPtr>();
+  private static readonly IntPtr PerMonitorAwareV2 = new IntPtr(-4);
+
+  [DllImport("user32.dll")]
+  private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+  [DllImport("user32.dll")]
+  private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+  [DllImport("user32.dll")]
+  private static extern bool IsWindowVisible(IntPtr hWnd);
+
+  [DllImport("user32.dll")]
+  private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+
+  [DllImport("user32.dll")]
+  private static extern bool SetCursorPos(int x, int y);
+
+  [DllImport("user32.dll")]
+  private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+  [DllImport("user32.dll")]
+  private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
+
+  public static void Click(uint processId, int xMillionths, int yMillionths) {
+    if (SetThreadDpiAwarenessContext(PerMonitorAwareV2) == IntPtr.Zero) {
+      throw new InvalidOperationException("Unable to enter a per-monitor DPI-aware coordinate context.");
+    }
+    targetProcessId = processId;
+    visibleWindows.Clear();
+    EnumWindows(InspectWindow, IntPtr.Zero);
+    if (visibleWindows.Count != 1) {
+      throw new InvalidOperationException(
+        "Expected exactly one visible top-level source window, found " + visibleWindows.Count + "."
+      );
+    }
+    RECT rect;
+    if (!GetWindowRect(visibleWindows[0], out rect)) {
+      throw new InvalidOperationException("Unable to inspect native window bounds.");
+    }
+    int width = rect.Right - rect.Left;
+    int height = rect.Bottom - rect.Top;
+    int x = rect.Left + (int)Math.Round(width * (xMillionths / 1000000.0));
+    int y = rect.Top + (int)Math.Round(height * (yMillionths / 1000000.0));
+    if (!SetCursorPos(x, y)) {
+      throw new InvalidOperationException("Unable to move the native cursor to the action.");
+    }
+    Thread.Sleep(80);
+    const uint LeftDown = 0x0002;
+    const uint LeftUp = 0x0004;
+    mouse_event(LeftDown, 0, 0, 0, UIntPtr.Zero);
+    Thread.Sleep(60);
+    mouse_event(LeftUp, 0, 0, 0, UIntPtr.Zero);
+  }
+
+  private static bool InspectWindow(IntPtr hWnd, IntPtr lParam) {
+    uint processId;
+    RECT rect;
+    GetWindowThreadProcessId(hWnd, out processId);
+    if (processId != targetProcessId || !IsWindowVisible(hWnd) || !GetWindowRect(hWnd, out rect)) {
+      return true;
+    }
+    if (rect.Right > rect.Left && rect.Bottom > rect.Top) visibleWindows.Add(hWnd);
+    return true;
+  }
+}
+'@
+[BeishuNativeClick]::Click([uint32]${processId}, ${xMillionths}, ${yMillionths})
+`);
+}
+
 const isolatedRoot = fs.mkdtempSync(path.join(workRoot, 'mode-rest-ui-'));
 const debugPort = await reserveDebugPort();
 const childEnvironment = {
   ...process.env,
   SUPERVISION_DATA_DIR: isolatedRoot,
+  SUPERVISION_TEST_HOOKS: '1',
 };
 delete childEnvironment.ELECTRON_RUN_AS_NODE;
 
@@ -411,6 +800,7 @@ appProcess.stderr.on('data', captureChildOutput);
 
 let main = null;
 let prompt = null;
+let originalSystemCursor = null;
 const report = {
   source: {
     executable: electronExecutable,
@@ -451,8 +841,8 @@ try {
     runtime: await window.desktopAPI.getRuntimeWindowState(),
     cache: await window.desktopAPI.getRuntimeCacheState()
   }))()`);
-  assert(report.initial.documentTitle === '背书自习监督', `Unexpected product title: ${report.initial.documentTitle}`);
-  assert(report.initial.heading === '背书自习监督', `Unexpected product heading: ${report.initial.heading}`);
+  assert(report.initial.documentTitle === '凛冬督学局', `Unexpected product title: ${report.initial.documentTitle}`);
+  assert(report.initial.heading === '凛冬督学局', `Unexpected product heading: ${report.initial.heading}`);
   assert(report.initial.creatorCredit === '原作：叛逆蓝牙 · 二创：眼泪斷了线',
     `Creator attribution is missing or wrong: ${report.initial.creatorCredit}`);
   assert(report.initial.runtime.windowCount === 1, 'Fresh source instance did not start with one window');
@@ -467,25 +857,206 @@ try {
   report.ipcBoundary = await main.evaluate(`(async () => {
     let invalidPayloadRejected = false;
     let extraFieldRejected = false;
+    let extraStudySettingsFieldRejected = false;
     try {
-      await window.desktopAPI.finishInlineAlert({ returnToHidden: 'false' });
+      await window.desktopAPI.finishInlineAlert({ alertId: '1', disposition: 'return' });
     } catch {
       invalidPayloadRejected = true;
     }
     try {
-      await window.desktopAPI.finishInlineAlert({ returnToHidden: false, extra: true });
+      await window.desktopAPI.finishInlineAlert({ alertId: 1, disposition: 'return', extra: true });
     } catch {
       extraFieldRejected = true;
     }
+    const studySettingsBefore = await window.desktopAPI.getStudySettings();
+    try {
+      await window.desktopAPI.setStudySettings({
+        ...studySettingsBefore.settings,
+        extra: true,
+      });
+    } catch {
+      extraStudySettingsFieldRejected = true;
+    }
+    const studySettingsAfter = await window.desktopAPI.getStudySettings();
     return {
       invalidPayloadRejected,
       extraFieldRejected,
+      extraStudySettingsFieldRejected,
+      rejectedStudySettingsUnchanged: JSON.stringify(studySettingsAfter.settings)
+        === JSON.stringify(studySettingsBefore.settings),
       popupBlocked: window.open('about:blank') === null,
     };
   })()`);
   assert(report.ipcBoundary.invalidPayloadRejected && report.ipcBoundary.extraFieldRejected,
     `Invalid finish-inline-alert payload was accepted: ${JSON.stringify(report.ipcBoundary)}`);
+  assert(report.ipcBoundary.extraStudySettingsFieldRejected
+    && report.ipcBoundary.rejectedStudySettingsUnchanged,
+  `Invalid study settings payload changed durable settings: ${JSON.stringify(report.ipcBoundary)}`);
   assert(report.ipcBoundary.popupBlocked, 'Main renderer was allowed to create a new window');
+
+  report.floatingBefore = await main.evaluate(`window.desktopAPI.getRuntimeWindowState()`);
+  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
+  originalSystemCursor = await getSystemCursorPosition();
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'outside');
+  await wait(300);
+  report.floatingShell = await main.evaluate(`(async () => {
+    const statusbar = document.querySelector('#floating-statusbar');
+    const canvas = document.querySelector('#study-scene-canvas');
+    const hoverTools = document.querySelector('.floating-hover-tools');
+    const timer = document.querySelector('#floating-timer');
+    const hideButton = document.querySelector('#floating-hide-button');
+    const expandButton = document.querySelector('#floating-expand-button');
+    const canvasRect = canvas.getBoundingClientRect();
+    return {
+      runtime: await window.desktopAPI.getRuntimeWindowState(),
+      statusbarVisible: statusbar.getClientRects().length > 0,
+      shellVisible: document.querySelector('.shell').getClientRects().length > 0,
+      titlebarVisible: document.querySelector('#window-titlebar').getClientRects().length > 0,
+      liveMeterVisible: document.querySelector('#live-meter').getClientRects().length > 0,
+      panelMeterVisible: document.querySelector('.meter-wrap .meter').getClientRects().length > 0,
+      hoverToolsOpacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+      dragRegions: {
+        statusbar: getComputedStyle(statusbar).getPropertyValue('-webkit-app-region'),
+        canvas: getComputedStyle(canvas).getPropertyValue('-webkit-app-region'),
+        hoverTools: getComputedStyle(hoverTools).getPropertyValue('-webkit-app-region'),
+        timer: getComputedStyle(timer).getPropertyValue('-webkit-app-region'),
+        hideButton: getComputedStyle(hideButton).getPropertyValue('-webkit-app-region'),
+        expandButton: getComputedStyle(expandButton).getPropertyValue('-webkit-app-region'),
+      },
+      canvasAspect: canvasRect.width / canvasRect.height,
+      canvasIdentityStable: canvas === document.querySelector('#study-scene-canvas'),
+    };
+  })()`);
+  assert(report.floatingShell.runtime.mode === 'floating'
+    && report.floatingShell.runtime.visible
+    && report.floatingShell.runtime.alwaysOnTop
+    && report.floatingShell.runtime.skipTaskbar
+    && report.floatingShell.runtime.resizable
+    && report.floatingShell.runtime.minimumSize?.width === 224
+    && report.floatingShell.runtime.minimumSize?.height === 170
+    && report.floatingShell.runtime.bounds?.width <= 320
+    && report.floatingShell.runtime.bounds?.height <= 225,
+  `Floating native window contract failed: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.runtime.windowCount === 1
+    && report.floatingShell.runtime.webContentsId === mainWebContentsId
+    && report.floatingShell.canvasIdentityStable,
+  `Floating mode created or replaced the main renderer: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.statusbarVisible
+    && !report.floatingShell.shellVisible
+    && !report.floatingShell.titlebarVisible
+    && !report.floatingShell.liveMeterVisible
+    && !report.floatingShell.panelMeterVisible
+    && report.floatingShell.hoverToolsOpacity === '0',
+  `Floating mode exposed extra UI: ${JSON.stringify(report.floatingShell)}`);
+  assert(Math.abs(report.floatingShell.canvasAspect - (16 / 9)) < 0.03,
+    `Floating canvas is not 16:9: ${JSON.stringify(report.floatingShell)}`);
+  assert(report.floatingShell.dragRegions.statusbar === 'drag'
+    && report.floatingShell.dragRegions.canvas === 'drag'
+    && report.floatingShell.dragRegions.hoverTools === 'no-drag'
+    && report.floatingShell.dragRegions.timer === 'drag'
+    && report.floatingShell.dragRegions.hideButton === 'no-drag'
+    && report.floatingShell.dragRegions.expandButton === 'no-drag',
+  `Floating drag and button hit regions overlap incorrectly: ${JSON.stringify(report.floatingShell.dragRegions)}`);
+
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
+  report.floatingHover = await main.evaluate(`(async () => {
+    const hideRect = document.querySelector('#floating-hide-button').getBoundingClientRect();
+    const expandRect = document.querySelector('#floating-expand-button').getBoundingClientRect();
+    return {
+      opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+      timer: document.querySelector('#floating-timer').textContent.trim(),
+      hideVisible: hideRect.width > 0 && hideRect.height > 0,
+      expandVisible: expandRect.width > 0 && expandRect.height > 0,
+      runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
+      hitPoints: {
+        hide: {
+          x: (hideRect.left + hideRect.width / 2) / innerWidth,
+          y: (hideRect.top + hideRect.height / 2) / innerHeight,
+        },
+        expand: {
+          x: (expandRect.left + expandRect.width / 2) / innerWidth,
+          y: (expandRect.top + expandRect.height / 2) / innerHeight,
+        },
+      },
+    };
+  })()`);
+  assert(report.floatingHover.opacity === '1'
+    && report.floatingHover.runtimeHovered
+    && /^已学习 \\d{2}:\\d{2}(?::\\d{2})?$/.test(report.floatingHover.timer)
+    && report.floatingHover.hideVisible
+    && report.floatingHover.expandVisible,
+  `Floating hover tools or elapsed timer are unavailable: ${JSON.stringify(report.floatingHover)}`);
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'outside');
+  await wait(300);
+  report.floatingLeave = await main.evaluate(`(async () => ({
+    opacity: getComputedStyle(document.querySelector('.floating-hover-tools')).opacity,
+    runtimeHovered: (await window.desktopAPI.getRuntimeWindowState()).floatingHovered,
+  }))()`);
+  assert(report.floatingLeave.opacity === '0' && !report.floatingLeave.runtimeHovered,
+    `Floating hover tools did not hide after the real cursor left: ${JSON.stringify(report.floatingLeave)}`);
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
+  await clickProcessWindowAtFraction(appProcess.pid, report.floatingHover.hitPoints.hide);
+  report.floatingHidden = await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'hidden' && !state.visible,
+  );
+  await main.evaluate(`window.desktopAPI.hideToBackground('floating')`);
+  await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'floating' && state.visible,
+  );
+  await moveSystemCursorRelativeToProcessWindow(appProcess.pid, 'inside');
+  await wait(300);
+
+  report.floatingAlertReturn = await main.evaluate(`(async () => {
+    const revealed = await window.desktopAPI.revealForInlineAlert();
+    const alert = await window.desktopAPI.getRuntimeWindowState();
+    const returned = await window.desktopAPI.finishInlineAlert({
+      alertId: revealed.alertId,
+      disposition: 'return',
+    });
+    return { revealed, alert, returned };
+  })()`);
+  assert(report.floatingAlertReturn.revealed.returnMode === 'floating'
+    && report.floatingAlertReturn.alert.mode === 'alert'
+    && report.floatingAlertReturn.returned.mode === 'floating'
+    && report.floatingAlertReturn.returned.alwaysOnTop
+    && report.floatingAlertReturn.returned.skipTaskbar
+    && report.floatingAlertReturn.returned.resizable
+    && !report.floatingAlertReturn.returned.minimizable
+    && !report.floatingAlertReturn.returned.maximizable,
+  `Floating alert did not return to the same compact contract: ${JSON.stringify(report.floatingAlertReturn)}`);
+
+  await waitForEvaluation(
+    main,
+    `getComputedStyle(document.querySelector('.floating-hover-tools')).opacity`,
+    (opacity) => opacity === '1',
+  );
+  report.floatingExpandPoint = await main.evaluate(`(() => {
+    const rect = document.querySelector('#floating-expand-button').getBoundingClientRect();
+    return {
+      x: (rect.left + rect.width / 2) / innerWidth,
+      y: (rect.top + rect.height / 2) / innerHeight,
+    };
+  })()`);
+  await clickProcessWindowAtFraction(appProcess.pid, report.floatingExpandPoint);
+  report.floatingShell.restored = await waitForEvaluation(
+    main,
+    `(async () => await window.desktopAPI.getRuntimeWindowState())()`,
+    (state) => state.mode === 'scene',
+  );
+  assert(report.floatingShell.restored.minimumSize?.width === 960
+    && report.floatingShell.restored.minimumSize?.height === 540
+    && report.floatingShell.restored.resizable
+    && report.floatingShell.restored.minimizable
+    && report.floatingShell.restored.maximizable,
+  `Floating expand did not restore the scene contract: ${JSON.stringify(report.floatingShell)}`);
+  await restoreSystemCursor(originalSystemCursor);
+  originalSystemCursor = null;
 
   report.windowChrome = await main.evaluate(`(() => {
     const titlebar = document.querySelector('#window-titlebar');
@@ -611,6 +1182,8 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
+      reciteDurationHidden: document.querySelector('#silence-limit-input').closest('label').hidden,
+      studyDurationHidden: document.querySelector('#study-voice-limit-input').closest('label').hidden,
     };
     document.querySelector('#recite-mode-button').click();
     const recite = {
@@ -619,128 +1192,86 @@ try {
       recitePressed: document.querySelector('#recite-mode-button').getAttribute('aria-pressed'),
       studyPressed: document.querySelector('#study-mode-button').getAttribute('aria-pressed'),
       liveTitle: document.querySelector('#live-voice-title').textContent,
+      reciteDurationHidden: document.querySelector('#silence-limit-input').closest('label').hidden,
+      studyDurationHidden: document.querySelector('#study-voice-limit-input').closest('label').hidden,
     };
     return { study, recite };
   })()`);
   assert(report.modeSwitch.study.mode === 'study'
     && report.modeSwitch.study.title.includes('自习')
     && report.modeSwitch.study.recitePressed === 'false'
-    && report.modeSwitch.study.studyPressed === 'true', 'Switching to study mode failed');
+    && report.modeSwitch.study.studyPressed === 'true'
+    && report.modeSwitch.study.reciteDurationHidden
+    && !report.modeSwitch.study.studyDurationHidden,
+  `Switching to study mode did not expose the correct duration control: ${JSON.stringify(report.modeSwitch.study)}`);
   assert(report.modeSwitch.recite.mode === 'recite'
     && report.modeSwitch.recite.title.includes('背书')
     && report.modeSwitch.recite.recitePressed === 'true'
-    && report.modeSwitch.recite.studyPressed === 'false', 'Switching back to recite mode failed');
+    && report.modeSwitch.recite.studyPressed === 'false'
+    && !report.modeSwitch.recite.reciteDurationHidden
+    && report.modeSwitch.recite.studyDurationHidden,
+  `Switching back to recite mode did not expose the correct duration control: ${JSON.stringify(report.modeSwitch.recite)}`);
 
-  report.collapsedThresholdDrag = await main.evaluate(`(() => {
-    const marker = document.querySelector('#live-volume-threshold');
-    const detailMarker = document.querySelector('#volume-threshold');
-    const meter = document.querySelector('#live-meter');
-    const range = document.querySelector('#voice-threshold-input');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 41;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      button: 0,
-      buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
+  report.automaticReciteGate = await main.evaluate(`(async () => {
+    const removedSelectors = [
+      '#floating-threshold-input',
+      '#live-volume-threshold',
+      '#volume-threshold',
+      '#voice-threshold-input',
+      '#recalibrate-button',
+    ];
+    const snapshot = window.__beishuTest.getSnapshot();
+    const originalEnvelope = await window.desktopAPI.getStudySettings();
+    const original = originalEnvelope.settings;
+    localStorage.setItem('red-watch-study-settings-v1', JSON.stringify({
+      ...original,
+      mode: original.mode === 'recite' ? 'study' : 'recite',
+      reciteSilenceSeconds: original.reciteSilenceSeconds === 60 ? 20 : 60,
+      reciteSensitivityDb: 18,
     }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      buttons: 1,
-      clientX: rect.left + rect.width * 0.64,
+    await loadSettings();
+    await saveSettings();
+    const afterFirstLoad = await window.desktopAPI.getStudySettings();
+    const firstLegacyRemoved = localStorage.getItem('red-watch-study-settings-v1') === null;
+    localStorage.setItem('red-watch-study-settings-v1', JSON.stringify({
+      ...original,
+      reciteSilenceSeconds: original.reciteSilenceSeconds === 20 ? 60 : 20,
+      reciteSensitivityDb: 99,
     }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true,
-      pointerId,
-      pointerType: 'mouse',
-      button: 0,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    const keyboardValues = [];
-    for (const key of ['ArrowRight', 'Home', 'End', 'ArrowLeft']) {
-      marker.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key }));
-      keyboardValues.push(Number(range.value));
-    }
+    await loadSettings();
+    await saveSettings();
+    const afterSecondLoad = await window.desktopAPI.getStudySettings();
     return {
-      controlsOpen: document.body.classList.contains('controls-open'),
-      keyboardValues,
-      stored: window.__beishuTest.getSnapshot().reciteSensitivityDb,
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).reciteSensitivityDb,
-      range: Number(range.value),
-      liveLeft: marker.style.left,
-      detailLeft: detailMarker.style.left,
-      liveAria: {
-        min: marker.getAttribute('aria-valuemin'),
-        max: marker.getAttribute('aria-valuemax'),
-        now: marker.getAttribute('aria-valuenow'),
-        text: marker.getAttribute('aria-valuetext'),
-        role: marker.getAttribute('role'),
-        tabIndex: marker.tabIndex,
-      },
-      detailAriaNow: detailMarker.getAttribute('aria-valuenow'),
+      removed: removedSelectors.every((selector) => !document.querySelector(selector)),
+      reciteUsesAutomaticVoiceGate: snapshot.reciteUsesAutomaticVoiceGate,
+      reciteAutoVoiceMarginDb: snapshot.reciteAutoVoiceMarginDb,
+      durableSettingsExist: originalEnvelope.exists === true,
+      firstLegacyRemoved,
+      secondLegacyRemoved: localStorage.getItem('red-watch-study-settings-v1') === null,
+      legacyNotReimported: JSON.stringify(afterFirstLoad.settings) === JSON.stringify(original)
+        && JSON.stringify(afterSecondLoad.settings) === JSON.stringify(original),
+      oldSensitivityRemoved: !Object.prototype.hasOwnProperty.call(afterFirstLoad.settings, 'reciteSensitivityDb')
+        && !Object.prototype.hasOwnProperty.call(afterSecondLoad.settings, 'reciteSensitivityDb'),
+      reciteSilenceSecondsPreserved: afterSecondLoad.settings.reciteSilenceSeconds
+        === original.reciteSilenceSeconds,
+      labels: [...document.querySelectorAll('.meter-labels span')].map((item) => item.textContent),
     };
   })()`);
-  assert(!report.collapsedThresholdDrag.controlsOpen
-    && JSON.stringify(report.collapsedThresholdDrag.keyboardValues) === JSON.stringify([15, 4, 18, 17])
-    && report.collapsedThresholdDrag.stored === 17
-    && report.collapsedThresholdDrag.persisted === 17
-    && report.collapsedThresholdDrag.range === 17
-    && report.collapsedThresholdDrag.liveLeft === '67%'
-    && report.collapsedThresholdDrag.detailLeft === '67%'
-    && report.collapsedThresholdDrag.liveAria.min === '4'
-    && report.collapsedThresholdDrag.liveAria.max === '18'
-    && report.collapsedThresholdDrag.liveAria.now === '17'
-    && report.collapsedThresholdDrag.liveAria.text === '底噪 + 17 dB'
-    && report.collapsedThresholdDrag.liveAria.role === 'slider'
-    && report.collapsedThresholdDrag.liveAria.tabIndex === 0
-    && report.collapsedThresholdDrag.detailAriaNow === '17',
-  `Collapsed live threshold marker did not drag, clamp, persist, or synchronize: ${JSON.stringify(report.collapsedThresholdDrag)}`);
+  assert(report.automaticReciteGate.removed
+    && report.automaticReciteGate.reciteUsesAutomaticVoiceGate
+    && report.automaticReciteGate.reciteAutoVoiceMarginDb === 8
+    && report.automaticReciteGate.durableSettingsExist
+    && report.automaticReciteGate.firstLegacyRemoved
+    && report.automaticReciteGate.secondLegacyRemoved
+    && report.automaticReciteGate.legacyNotReimported
+    && report.automaticReciteGate.oldSensitivityRemoved
+    && report.automaticReciteGate.reciteSilenceSecondsPreserved
+    && JSON.stringify(report.automaticReciteGate.labels) === JSON.stringify(['较轻', '较响']),
+  `Automatic recite gate UI or legacy-setting migration is inconsistent: ${JSON.stringify(report.automaticReciteGate)}`);
 
   await main.evaluate(`document.querySelector('#controls-button').click()`);
   report.layouts.wideExpanded = await main.evaluate(layoutExpression);
   assertLayout(report.layouts.wideExpanded, '1920 expanded layout');
-
-  report.detailThresholdDrag = await main.evaluate(`(() => {
-    const marker = document.querySelector('#volume-threshold');
-    const liveMarker = document.querySelector('#live-volume-threshold');
-    const meter = document.querySelector('.meter-wrap .meter');
-    const range = document.querySelector('#voice-threshold-input');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 42;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, pointerId, pointerType: 'touch', button: 0, buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
-    }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true, pointerId, pointerType: 'touch', buttons: 1,
-      clientX: rect.left + rect.width * 0.61,
-    }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true, pointerId, pointerType: 'touch', button: 0,
-      clientX: rect.left + rect.width * 0.61,
-    }));
-    return {
-      stored: window.__beishuTest.getSnapshot().reciteSensitivityDb,
-      range: Number(range.value),
-      detailLeft: marker.style.left,
-      liveLeft: liveMarker.style.left,
-      detailAriaNow: marker.getAttribute('aria-valuenow'),
-      liveAriaNow: liveMarker.getAttribute('aria-valuenow'),
-    };
-  })()`);
-  assert(report.detailThresholdDrag.stored === 11
-    && report.detailThresholdDrag.range === 11
-    && report.detailThresholdDrag.detailLeft === '61%'
-    && report.detailThresholdDrag.liveLeft === '61%'
-    && report.detailThresholdDrag.detailAriaNow === '11'
-    && report.detailThresholdDrag.liveAriaNow === '11',
-  `Detailed threshold marker did not update the hidden range and live marker: ${JSON.stringify(report.detailThresholdDrag)}`);
 
   report.reciteBoundary = await main.evaluate(rangeBoundaryExpression(
     '#silence-limit-input',
@@ -833,21 +1364,25 @@ try {
         return destination.stream;
       }
     });
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
+    ];
     Object.defineProperty(navigator.mediaDevices, 'enumerateDevices', {
       configurable: true,
-      value: async () => [
-        { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
-        { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
-      ],
+      value: async () => window.__testMicrophoneDevices.map((device) => ({ ...device })),
     });
     await refreshMicrophones({ requestPermission: true });
     const microphone = document.querySelector('#microphone-select');
     microphone.value = 'mic-b';
     microphone.dispatchEvent(new Event('change', { bubbles: true }));
+    await saveSettings();
+    const persistedMicrophone = await window.desktopAPI.getStudySettings();
     window.__microphoneSelection = {
       options: [...microphone.options].map((option) => ({ value: option.value, text: option.textContent.trim() })),
       selected: microphone.value,
-      settings: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).microphoneDeviceId,
+      settings: persistedMicrophone.settings.microphoneDeviceId,
+      label: persistedMicrophone.settings.microphoneDeviceLabel,
       constraints: microphoneConstraints(),
     };
     window.__gumCalls = [];
@@ -878,10 +1413,44 @@ try {
   report.microphoneSelection = await main.evaluate(`window.__microphoneSelection`);
   assert(report.microphoneSelection.selected === 'mic-b'
     && report.microphoneSelection.settings === 'mic-b'
+    && report.microphoneSelection.label === 'USB 麦克风'
     && report.microphoneSelection.options.length === 3
     && report.microphoneSelection.constraints.audio.deviceId.exact === 'mic-b'
     && report.microphoneSelection.constraints.video === false,
   `Microphone selection was not persisted or applied: ${JSON.stringify(report.microphoneSelection)}`);
+
+  report.missingMicrophone = await main.evaluate(`(async () => {
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-c', label: 'USB 麦克风' },
+    ];
+    await refreshMicrophones();
+    await saveSettings();
+    const select = document.querySelector('#microphone-select');
+    const persisted = await window.desktopAPI.getStudySettings();
+    const result = {
+      selected: select.value,
+      storedId: persisted.settings.microphoneDeviceId,
+      storedLabel: persisted.settings.microphoneDeviceLabel,
+      missingOption: [...select.options].some((option) => option.value === 'mic-b'
+        && option.textContent.includes('当前不可用')),
+      status: document.querySelector('#microphone-status').textContent.trim(),
+      constraints: microphoneConstraints(),
+    };
+    window.__testMicrophoneDevices = [
+      { kind: 'audioinput', deviceId: 'mic-a', label: '桌面麦克风' },
+      { kind: 'audioinput', deviceId: 'mic-b', label: 'USB 麦克风' },
+    ];
+    await refreshMicrophones();
+    return result;
+  })()`);
+  assert(report.missingMicrophone.selected === 'mic-b'
+    && report.missingMicrophone.storedId === 'mic-b'
+    && report.missingMicrophone.storedLabel === 'USB 麦克风'
+    && report.missingMicrophone.missingOption
+    && report.missingMicrophone.status.includes('当前不可用')
+    && report.missingMicrophone.constraints.audio.deviceId.exact === 'mic-b',
+  `Missing selected microphone was silently replaced: ${JSON.stringify(report.missingMicrophone)}`);
 
   report.preflightStarted = await main.evaluate(`(async () => {
     document.querySelector('#study-mode-button').click();
@@ -904,14 +1473,17 @@ try {
     && !report.preflightStarted.snapshot.active
     && report.preflightStarted.snapshot.sessionPhase === 'idle',
   `Study preflight did not start in idle mode: ${JSON.stringify(report.preflightStarted)}`);
-  await completePreflightCalibration(main);
+  await waitForDirectStudyDetection(main, { preflight: true });
   const preflightElapsedBefore = await main.evaluate(`window.__beishuTest.getSnapshot().effectiveElapsedMs`);
   await wait(300);
-  report.preflightCalibrated = await main.evaluate(`(() => {
+  report.preflightReady = await main.evaluate(`(() => {
     const snapshot = window.__beishuTest.getSnapshot();
     const stream = window.__gumStreams[0];
     return {
       snapshot,
+      hasVad: Boolean(state.vad),
+      silenceArmed: state.silenceArmed,
+      vadState: document.body.dataset.vadState,
       gum: window.__gumRequests[0],
       audioTracks: stream?.getAudioTracks().length || 0,
       videoTracks: stream?.getVideoTracks().length || 0,
@@ -923,76 +1495,64 @@ try {
       status: document.querySelector('#preflight-test-status').textContent.trim(),
     };
   })()`);
-  assert(Boolean(report.preflightCalibrated.gum?.constraints?.audio)
-    && report.preflightCalibrated.gum?.constraints?.video === false
-    && report.preflightCalibrated.gum?.constraints?.audio?.deviceId?.exact === 'mic-b'
-    && report.preflightCalibrated.gum.liveBeforeRequest === 0
-    && report.preflightCalibrated.audioTracks === 1
-    && report.preflightCalibrated.videoTracks === 0
-    && report.preflightCalibrated.liveTracks === 1,
-  `Study preflight microphone was not a single audio-only stream: ${JSON.stringify(report.preflightCalibrated)}`);
-  assert(report.preflightCalibrated.snapshot.preflightTesting
-    && report.preflightCalibrated.snapshot.microphoneOpen
-    && !report.preflightCalibrated.snapshot.calibrating
-    && !report.preflightCalibrated.snapshot.active
-    && report.preflightCalibrated.snapshot.sessionPhase === 'idle'
-    && report.preflightCalibrated.snapshot.effectiveElapsedMs === preflightElapsedBefore
-    && report.preflightCalibrated.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
-    && report.preflightCalibrated.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
-    && JSON.stringify(report.preflightCalibrated.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
-    && JSON.stringify(report.preflightCalibrated.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
-    && report.preflightCalibrated.scenePhase === report.preflightStarted.baseline.scenePhase
-    && report.preflightCalibrated.sceneClip === report.preflightStarted.baseline.sceneClip
-    && report.preflightCalibrated.sceneRunning === report.preflightStarted.baseline.sceneRunning
-    && report.preflightCalibrated.timer === report.preflightStarted.baseline.timer,
-  `Idle preflight started session state, timing, reminders, scenes, or source audio: ${JSON.stringify(report.preflightCalibrated)}`);
+  assert(Boolean(report.preflightReady.gum?.constraints?.audio)
+    && report.preflightReady.gum?.constraints?.video === false
+    && report.preflightReady.gum?.constraints?.audio?.deviceId?.exact === 'mic-b'
+    && report.preflightReady.gum.liveBeforeRequest === 0
+    && report.preflightReady.audioTracks === 1
+    && report.preflightReady.videoTracks === 0
+    && report.preflightReady.liveTracks === 1,
+  `Study preflight microphone was not a single audio-only stream: ${JSON.stringify(report.preflightReady)}`);
+  assert(report.preflightReady.snapshot.preflightTesting
+    && report.preflightReady.snapshot.microphoneOpen
+    && !report.preflightReady.snapshot.calibrating
+    && !report.preflightReady.hasVad
+    && report.preflightReady.silenceArmed
+    && report.preflightReady.vadState === 'ready'
+    && !report.preflightReady.snapshot.active
+    && report.preflightReady.snapshot.sessionPhase === 'idle'
+    && report.preflightReady.snapshot.effectiveElapsedMs === preflightElapsedBefore
+    && report.preflightReady.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
+    && report.preflightReady.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
+    && JSON.stringify(report.preflightReady.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
+    && JSON.stringify(report.preflightReady.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
+    && report.preflightReady.scenePhase === report.preflightStarted.baseline.scenePhase
+    && report.preflightReady.sceneClip === report.preflightStarted.baseline.sceneClip
+    && report.preflightReady.sceneRunning === report.preflightStarted.baseline.sceneRunning
+    && report.preflightReady.timer === report.preflightStarted.baseline.timer,
+  `Idle preflight waited for calibration or changed session state: ${JSON.stringify(report.preflightReady)}`);
 
-  report.preflightThreshold = await main.evaluate(`(() => {
+  report.preflightClassification = await main.evaluate(`(() => {
     const duration = document.querySelector('#study-voice-limit-input');
-    const sensitivity = document.querySelector('#voice-threshold-input');
     duration.value = '3';
     duration.dispatchEvent(new Event('input', { bubbles: true }));
-    sensitivity.value = '16';
-    sensitivity.dispatchEvent(new Event('input', { bubbles: true }));
-    state.vad.process = () => ({
-      calibrated: true,
-      calibrationProgress: 1,
-      isSpeech: true,
-      levelDb: -40,
-      levelPercent: 60,
-      noiseFloorDb: -50,
-      thresholdDb: -34,
-      steadyNoise: false,
-      speechScore: 1,
-      voiceRatio: 0.7,
-      flatness: 0.2,
-      flux: 0.08
-    });
-    pollMicrophone();
-    const highSensitivity = {
-      detector: state.quietDetector.snapshot(),
-      evidence: state.latestQuietResult.evidence,
+
+    const mediaDecision = POLICY.classifyStudyAudioEvents([{ name: 'Speech', prob: 0.9 }]);
+    const quietDecision = POLICY.classifyStudyAudioEvents([]);
+    const applyDecision = (decision, durationMs = 1_000) => {
+      const quietResult = state.quietDetector.process(
+        { mediaEvidence: decision.mediaEvidence },
+        durationMs,
+      );
+      renderStudyAudioDecision(quietResult, decision);
+      return {
+        snapshot: window.__beishuTest.getSnapshot(),
+        detector: state.quietDetector.snapshot(),
+        quietResult,
+        status: document.querySelector('#preflight-test-status').textContent.trim(),
+        voiceChip: document.querySelector('#voice-state').textContent.trim(),
+        voiceStatus: document.querySelector('#voice-status').textContent.trim(),
+      };
     };
-    sensitivity.value = '6';
-    sensitivity.dispatchEvent(new Event('input', { bubbles: true }));
-    pollMicrophone();
-    const lowSensitivity = {
-      detector: state.quietDetector.snapshot(),
-      evidence: state.latestQuietResult.evidence,
-    };
-    for (let index = 0; index < 28; index += 1) pollMicrophone();
-    const beforeThreshold = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-    };
-    pollMicrophone();
+
+    const firstEvidence = applyDecision(mediaDecision);
+    const secondEvidence = applyDecision(mediaDecision);
+    const recoveryUpdates = Array.from({ length: 4 }, () => applyDecision(quietDecision));
+    const resumedEvidence = applyDecision(mediaDecision);
+    const resumedThreshold = applyDecision(mediaDecision);
     const afterThreshold = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-      voiceChip: document.querySelector('#voice-state').textContent.trim(),
-      voiceStatus: document.querySelector('#voice-status').textContent.trim(),
+      ...resumedThreshold,
       durationOutput: document.querySelector('#study-voice-limit-value').textContent.trim(),
-      sensitivityOutput: document.querySelector('#voice-threshold-value').textContent.trim(),
       sceneRunning: state.sceneRunning,
     };
 
@@ -1005,108 +1565,78 @@ try {
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
     };
-    for (let index = 0; index < 149; index += 1) pollMicrophone();
-    const beforeNewDuration = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-    };
-    pollMicrophone();
-    const afterNewDuration = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-    };
-
-    const marker = document.querySelector('#live-volume-threshold');
-    const detailMarker = document.querySelector('#volume-threshold');
-    const meter = document.querySelector('#live-meter');
-    const rect = meter.getBoundingClientRect();
-    const markerRect = marker.getBoundingClientRect();
-    const pointerId = 43;
-    marker.dispatchEvent(new PointerEvent('pointerdown', {
-      bubbles: true, pointerId, pointerType: 'mouse', button: 0, buttons: 1,
-      clientX: markerRect.left + markerRect.width / 2,
-    }));
-    window.dispatchEvent(new PointerEvent('pointermove', {
-      bubbles: true, pointerId, pointerType: 'mouse', buttons: 1,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    window.dispatchEvent(new PointerEvent('pointerup', {
-      bubbles: true, pointerId, pointerType: 'mouse', button: 0,
-      clientX: rect.left + rect.width * 0.64,
-    }));
-    const afterMarkerChange = {
-      snapshot: window.__beishuTest.getSnapshot(),
-      detector: state.quietDetector.snapshot(),
-      vadSensitivityDb: state.vad.sensitivityDb,
-      latestQuietResult: state.latestQuietResult,
-      status: document.querySelector('#preflight-test-status').textContent.trim(),
-      voiceStatus: document.querySelector('#voice-status').textContent.trim(),
-      range: Number(sensitivity.value),
-      liveLeft: marker.style.left,
-      detailLeft: detailMarker.style.left,
-      liveAriaNow: marker.getAttribute('aria-valuenow'),
-      detailAriaNow: detailMarker.getAttribute('aria-valuenow'),
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).studySensitivityDb,
-    };
+    applyDecision(mediaDecision);
+    applyDecision(mediaDecision);
+    const fullRecoveryUpdates = Array.from({ length: 5 }, () => applyDecision(quietDecision));
+    duration.dispatchEvent(new Event('input', { bubbles: true }));
+    const fifteenSecondUpdates = Array.from({ length: 15 }, () => applyDecision(mediaDecision));
+    const beforeNewDuration = fifteenSecondUpdates.at(-1);
+    const afterNewDuration = applyDecision(mediaDecision);
     return {
-      highSensitivity,
-      lowSensitivity,
-      beforeThreshold,
+      mediaEvidence: mediaDecision.mediaEvidence,
+      quietEvidence: quietDecision.mediaEvidence,
+      firstEvidence,
+      secondEvidence,
+      recoveryUpdates,
+      resumedEvidence,
+      resumedThreshold,
       afterThreshold,
       afterDurationChange,
+      fullRecoveryUpdates,
       beforeNewDuration,
       afterNewDuration,
-      afterMarkerChange,
     };
   })()`);
-  assert(report.preflightThreshold.highSensitivity.detector.violationSeconds === 3
-    && report.preflightThreshold.highSensitivity.detector.sensitivityDb === 16
-    && !report.preflightThreshold.highSensitivity.evidence
-    && report.preflightThreshold.lowSensitivity.detector.sensitivityDb === 6
-    && report.preflightThreshold.lowSensitivity.evidence,
-  `Preflight sliders did not update the live detector: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.beforeThreshold.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterThreshold.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterThreshold.status === '按当前设置将触发提醒。'
-    && report.preflightThreshold.afterThreshold.voiceChip === '已达到提醒条件'
-    && report.preflightThreshold.afterThreshold.voiceStatus === '已达到提醒条件'
-    && report.preflightThreshold.afterThreshold.durationOutput === '3 秒'
-    && report.preflightThreshold.afterThreshold.sensitivityOutput === '底噪 + 6 dB'
-    && report.preflightThreshold.afterThreshold.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
-    && report.preflightThreshold.afterThreshold.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
-    && JSON.stringify(report.preflightThreshold.afterThreshold.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
-    && JSON.stringify(report.preflightThreshold.afterThreshold.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
-    && !report.preflightThreshold.afterThreshold.sceneRunning,
-  `Preflight threshold caused a real reminder or scene change: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.afterDurationChange.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterDurationChange.detector.violationSeconds === 15
-    && report.preflightThreshold.afterDurationChange.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterDurationChange.latestQuietResult === null
-    && report.preflightThreshold.afterDurationChange.status === '设置已更新，请继续测试。'
-    && report.preflightThreshold.afterDurationChange.voiceStatus === '设置已更新，请继续测试'
-    && !report.preflightThreshold.beforeNewDuration.snapshot.preflightThresholdReached
-    && report.preflightThreshold.beforeNewDuration.detector.suspectedSpeechMs === 14_900
-    && report.preflightThreshold.afterNewDuration.snapshot.preflightThresholdReached
-    && !report.preflightThreshold.afterNewDuration.detector.armed
-    && report.preflightThreshold.afterNewDuration.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterNewDuration.status === '按当前设置将触发提醒。',
-  `Changing the preflight duration preserved stale evidence or ignored the new duration: ${JSON.stringify(report.preflightThreshold)}`);
-  assert(!report.preflightThreshold.afterMarkerChange.snapshot.preflightThresholdReached
-    && report.preflightThreshold.afterMarkerChange.snapshot.studySensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.detector.sensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.detector.suspectedSpeechMs === 0
-    && report.preflightThreshold.afterMarkerChange.vadSensitivityDb === 14
-    && report.preflightThreshold.afterMarkerChange.latestQuietResult === null
-    && report.preflightThreshold.afterMarkerChange.status === '设置已更新，请继续测试。'
-    && report.preflightThreshold.afterMarkerChange.voiceStatus === '设置已更新，请继续测试'
-    && report.preflightThreshold.afterMarkerChange.range === 14
-    && report.preflightThreshold.afterMarkerChange.liveLeft === '64%'
-    && report.preflightThreshold.afterMarkerChange.detailLeft === '64%'
-    && report.preflightThreshold.afterMarkerChange.liveAriaNow === '14'
-    && report.preflightThreshold.afterMarkerChange.detailAriaNow === '14'
-    && report.preflightThreshold.afterMarkerChange.persisted === 14,
-  `Dragging the live marker did not reset stale preflight evidence or synchronize detectors: ${JSON.stringify(report.preflightThreshold)}`);
+  assert(report.preflightClassification.mediaEvidence
+    && !report.preflightClassification.quietEvidence
+    && report.preflightClassification.firstEvidence.quietResult.suspectedSpeechMs === 0
+    && report.preflightClassification.firstEvidence.voiceChip === '正在复核媒体声音'
+    && report.preflightClassification.secondEvidence.quietResult.suspectedSpeechMs === 1_000
+    && report.preflightClassification.secondEvidence.voiceChip === '疑似媒体声音 1.0 秒'
+    && report.preflightClassification.secondEvidence.status === '已累计疑似媒体声音 1.0 秒。',
+  `Study preflight did not update continuous classifier evidence in real time: ${JSON.stringify(report.preflightClassification)}`);
+  assert(JSON.stringify(report.preflightClassification.recoveryUpdates.map((item) => item.quietResult.suspectedSpeechMs))
+      === JSON.stringify([1_000, 1_000, 1_000, 1_000])
+    && JSON.stringify(report.preflightClassification.recoveryUpdates.map((item) => item.quietResult.evidenceGapMs))
+      === JSON.stringify([1_000, 2_000, 3_000, 4_000])
+    && report.preflightClassification.recoveryUpdates.every((item) => item.voiceChip === '正在确认恢复')
+    && report.preflightClassification.resumedEvidence.quietResult.suspectedSpeechMs === 2_000
+    && !report.preflightClassification.resumedEvidence.snapshot.preflightThresholdReached,
+  `Short normal gaps did not preserve the study-media candidate: ${JSON.stringify(report.preflightClassification)}`);
+  assert(report.preflightClassification.resumedThreshold.quietResult.violated
+    && report.preflightClassification.afterThreshold.snapshot.preflightThresholdReached
+    && report.preflightClassification.afterThreshold.status === '按当前设置将触发提醒。'
+    && report.preflightClassification.afterThreshold.voiceChip === '已达到提醒条件'
+    && report.preflightClassification.afterThreshold.voiceStatus === '已达到提醒条件'
+    && report.preflightClassification.afterThreshold.durationOutput === '3 秒'
+    && report.preflightClassification.afterThreshold.snapshot.alerts === report.preflightStarted.baseline.snapshot.alerts
+    && report.preflightClassification.afterThreshold.snapshot.lives === report.preflightStarted.baseline.snapshot.lives
+    && JSON.stringify(report.preflightClassification.afterThreshold.snapshot.trace) === JSON.stringify(report.preflightStarted.baseline.snapshot.trace)
+    && JSON.stringify(report.preflightClassification.afterThreshold.snapshot.audioTrace) === JSON.stringify(report.preflightStarted.baseline.snapshot.audioTrace)
+    && !report.preflightClassification.afterThreshold.sceneRunning,
+  `Study preflight threshold caused a real reminder or failed to track consecutive evidence: ${JSON.stringify(report.preflightClassification)}`);
+  assert(!report.preflightClassification.afterDurationChange.snapshot.preflightThresholdReached
+    && report.preflightClassification.afterDurationChange.detector.violationSeconds === 15
+    && report.preflightClassification.afterDurationChange.detector.suspectedSpeechMs === 0
+    && report.preflightClassification.afterDurationChange.latestQuietResult === null
+    && report.preflightClassification.afterDurationChange.status === '设置已更新，请继续测试。'
+    && report.preflightClassification.afterDurationChange.voiceStatus === '设置已更新，请继续测试'
+    && !report.preflightClassification.beforeNewDuration.snapshot.preflightThresholdReached
+    && report.preflightClassification.beforeNewDuration.detector.suspectedSpeechMs === 14_000
+    && report.preflightClassification.afterNewDuration.snapshot.preflightThresholdReached
+    && !report.preflightClassification.afterNewDuration.detector.armed
+    && report.preflightClassification.afterNewDuration.detector.suspectedSpeechMs === 0
+    && report.preflightClassification.afterNewDuration.status === '按当前设置将触发提醒。',
+  `Changing the preflight duration preserved stale evidence or ignored the new duration: ${JSON.stringify(report.preflightClassification)}`);
+  assert(JSON.stringify(report.preflightClassification.fullRecoveryUpdates.map((item) => item.quietResult.suspectedSpeechMs))
+      === JSON.stringify([1_000, 1_000, 1_000, 1_000, 0])
+    && JSON.stringify(report.preflightClassification.fullRecoveryUpdates.map((item) => item.quietResult.evidenceGapMs))
+      === JSON.stringify([1_000, 2_000, 3_000, 4_000, 0])
+    && report.preflightClassification.fullRecoveryUpdates.slice(0, 4)
+      .every((item) => item.voiceChip === '正在确认恢复')
+    && report.preflightClassification.fullRecoveryUpdates.at(-1).voiceChip === '安静'
+    && report.preflightClassification.fullRecoveryUpdates.at(-1).status === '当前没有达到提醒条件。',
+  `Five continuous normal seconds did not clear the study-media candidate: ${JSON.stringify(report.preflightClassification.fullRecoveryUpdates)}`);
 
   report.preflightStopped = await main.evaluate(`(async () => {
     const stream = window.__gumStreams[0];
@@ -1243,7 +1773,7 @@ try {
   assert(report.studyWithoutVoiceprint.mode === 'study'
     && !report.studyWithoutVoiceprint.profile
     && report.studyWithoutVoiceprint.startEnabled, 'Study mode was blocked by a missing voiceprint');
-  await completePreflightCalibration(main);
+  await waitForDirectStudyDetection(main, { preflight: true });
   report.startWinsRace = await main.evaluate(`(async () => {
     const [startResult, previewResult, enrollmentResult] = await Promise.all([
       startSession(),
@@ -1266,9 +1796,12 @@ try {
     && !report.startWinsRace.enrollmentPending
     && !report.startWinsRace.enrollmentOpen,
   `Start did not exclude simultaneous preview/enrollment: ${JSON.stringify(report.startWinsRace)}`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   report.studyStarted = await main.evaluate(`({
     snapshot: window.__beishuTest.getSnapshot(),
+    hasVad: Boolean(state.vad),
+    silenceArmed: state.silenceArmed,
+    vadState: document.body.dataset.vadState,
     gum: window.__gumRequests.at(-1),
     audioTracks: state.audioStream?.getAudioTracks().length || 0,
     videoTracks: state.audioStream?.getVideoTracks().length || 0,
@@ -1281,6 +1814,11 @@ try {
   })`);
   assert(report.studyStarted.snapshot.active && report.studyStarted.snapshot.mode === 'study'
     && report.studyStarted.snapshot.sessionPhase === 'studying'
+    && report.studyStarted.snapshot.studyUsesDirectClassification
+    && !report.studyStarted.snapshot.calibrating
+    && !report.studyStarted.hasVad
+    && report.studyStarted.silenceArmed
+    && report.studyStarted.vadState === 'ready'
     && !report.studyStarted.snapshot.preflightTesting
     && !report.studyStarted.snapshot.preflightStarting
     && !report.studyStarted.snapshot.preflightStopping,
@@ -1296,23 +1834,22 @@ try {
   assertLayout(report.studyStarted.layout, 'Active study layout');
 
   report.meters = await main.evaluate(`(() => {
-    state.vad.process = () => ${forcedVadResult};
+    Object.defineProperty(state.analyser, 'getFloatTimeDomainData', {
+      configurable: true,
+      value: (samples) => samples.fill(10 ** (-63 / 20)),
+    });
     pollMicrophone();
     const detailMeter = document.querySelector('.meter-wrap .meter');
     const liveMeter = document.querySelector('#live-meter');
-    const snapshot = window.__beishuTest.getSnapshot();
-    const expectedThreshold = String(Math.min(100, Math.max(0,
-      snapshot.latestNoiseFloorDb + snapshot.studySensitivityDb + 100))) + '%';
     return {
       detailAria: detailMeter.getAttribute('aria-valuenow'),
       liveAria: liveMeter.getAttribute('aria-valuenow'),
       detailBar: document.querySelector('#volume-bar').style.width,
       liveBar: document.querySelector('#live-volume-bar').style.width,
-      detailThreshold: document.querySelector('#volume-threshold').style.left,
-      liveThreshold: document.querySelector('#live-volume-threshold').style.left,
-      expectedThreshold,
-      sensitivityDb: snapshot.studySensitivityDb,
-      noiseFloorDb: snapshot.latestNoiseFloorDb,
+      thresholdControlsAbsent: !document.querySelector('#volume-threshold')
+        && !document.querySelector('#live-volume-threshold')
+        && !document.querySelector('#voice-threshold-input'),
+      hasVad: Boolean(state.vad),
       stripVisible: ${layoutExpression}.stripVisible,
     };
   })()`);
@@ -1320,12 +1857,29 @@ try {
     report.failures.push(`Meter aria values are not synchronized: ${JSON.stringify(report.meters)}`);
   }
   assert(report.meters.detailBar === '37%' && report.meters.liveBar === '37%'
-    && report.meters.detailThreshold === report.meters.expectedThreshold
-    && report.meters.liveThreshold === report.meters.expectedThreshold
-    && report.meters.sensitivityDb === 14
-    && report.meters.noiseFloorDb === -50,
-  `Meter visuals are not synchronized: ${JSON.stringify(report.meters)}`);
+    && report.meters.thresholdControlsAbsent
+    && !report.meters.hasVad,
+  `Study raw-volume meters or removed threshold controls are inconsistent: ${JSON.stringify(report.meters)}`);
   assert(report.meters.stripVisible, 'Live voice strip disappeared during active detection');
+
+  report.studyRestStarted = await main.evaluate(`(() => {
+    state.milestoneLedger = new POLICY.MilestoneLedger('study', { availableBreakVouchers: 1 });
+    updateBreakButton();
+    return window.__beishuTest.startBreak(5_000);
+  })()`);
+  assert(report.studyRestStarted, 'Study rest did not start with an available voucher');
+  await waitForEvaluation(
+    main,
+    `window.__beishuTest.getSnapshot()`,
+    (value) => value.mode === 'study' && value.sessionPhase === 'resting' && !value.microphoneOpen,
+  );
+  await main.evaluate(`window.__beishuTest.completeBreak()`);
+  report.studyRestResumed = await waitForDirectStudyDetection(main);
+  assert(report.studyRestResumed.snapshot.sessionPhase === 'studying'
+    && !report.studyRestResumed.snapshot.calibrating
+    && !report.studyRestResumed.hasVad
+    && report.studyRestResumed.silenceArmed,
+  `Study rest recovery waited for calibration or created a VAD: ${JSON.stringify(report.studyRestResumed)}`);
 
   await main.evaluate(`stopSession(false, true)`);
   await waitForEvaluation(main, `window.__beishuTest.getSnapshot()`, (value) => !value.active && value.sessionPhase === 'idle');
@@ -1492,16 +2046,18 @@ try {
     };
     const decoded = {};
     for (const [name, value] of Object.entries(encoded)) decoded[name] = await decode(value);
-    await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollmentId = enrollment.enrollmentId;
     const names = [...Object.keys(decoded), ...Object.keys(decoded), ...Object.keys(decoded)].slice(0, 8);
     for (const name of names) {
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId,
         source: 'mic',
         samples: decoded[name],
         sampleRate: 16000,
       });
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(enrollmentId);
     await refreshSpeakerState();
     await context.close();
     return { profile, rendererProfile: state.speakerProfileExists };
@@ -1514,18 +2070,18 @@ try {
     return window.__beishuTest.startPreflightTest();
   })()`);
   await completePreflightCalibration(main);
-  report.recitePreflightGrace = await main.evaluate(`(() => {
+  report.recitePreflightGrace = await main.evaluate(`(async () => {
     state.vad.process = () => ${forcedVadResult};
     const alerts = state.alerts;
     const lives = state.lives;
     state.speakerVerificationPending = true;
-    state.silentSince = Date.now() - violationLimitMs();
+    state.silentSince = monotonicNow() - violationLimitMs();
     pollMicrophone();
     const withinGrace = {
       snapshot: window.__beishuTest.getSnapshot(),
       status: document.querySelector('#preflight-test-status').textContent.trim(),
     };
-    state.silentSince = Date.now() - violationLimitMs() - SPEAKER_DEADLINE_GRACE_MS - 50;
+    state.silentSince = monotonicNow() - violationLimitMs() - SPEAKER_DEADLINE_GRACE_MS - 50;
     pollMicrophone();
     const afterGrace = {
       snapshot: window.__beishuTest.getSnapshot(),
@@ -1535,12 +2091,14 @@ try {
     const duration = document.querySelector('#silence-limit-input');
     duration.value = '20';
     duration.dispatchEvent(new Event('input', { bubbles: true }));
+    await saveSettings();
+    const persistedSettings = await window.desktopAPI.getStudySettings();
     const afterSettingChange = {
       snapshot: window.__beishuTest.getSnapshot(),
       status: document.querySelector('#preflight-test-status').textContent.trim(),
       voiceStatus: document.querySelector('#voice-status').textContent.trim(),
-      silentForMs: Date.now() - state.silentSince,
-      persisted: JSON.parse(localStorage.getItem('red-watch-study-settings-v1')).reciteSilenceSeconds,
+      silentForMs: monotonicNow() - state.silentSince,
+      persisted: persistedSettings.settings.reciteSilenceSeconds,
     };
     pollMicrophone();
     const afterNextPoll = {
@@ -1656,7 +2214,8 @@ try {
   }
   assert(report.earned.runtime.webContentsId === mainWebContentsId
     && report.earned.runtime.windowCount === 2, 'Break prompt replaced the main webContents or duplicated windows');
-  assert(report.earnedPrompt.kind === 'earned' && report.earnedPrompt.earnedVisible
+  assert(report.earnedPrompt.title === '凛冬督学局 · 休息券'
+    && report.earnedPrompt.kind === 'earned' && report.earnedPrompt.earnedVisible
     && report.earnedPrompt.restingHidden && report.earnedPrompt.credits.includes('1'),
   `Earned prompt content is wrong: ${JSON.stringify(report.earnedPrompt)}`);
   assert(Math.abs(report.earnedPrompt.innerWidth - 420) <= 8
@@ -1832,7 +2391,7 @@ try {
     document.querySelector('#start-button').click();
     return true;
   })()`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   await main.evaluate(`(() => {
     window.__sessionFailurePromise = window.__beishuTest.runScheduledPlan({
       kind: 'patrol',
@@ -1874,7 +2433,7 @@ try {
     document.querySelector('#start-button').click();
     return true;
   })()`);
-  await completeCalibration(main);
+  await waitForDirectStudyDetection(main);
   await main.evaluate(`(() => {
     window.__stoppingFailurePromise = window.__beishuTest.runScheduledPlan({
       kind: 'patrol',
@@ -1918,13 +2477,21 @@ try {
   if (childOutput) error.message = `${error.message}\nSource instance output:\n${childOutput}`;
   throw error;
 } finally {
+  let cursorRestoreFailure = null;
+  if (originalSystemCursor) {
+    try {
+      await restoreSystemCursor(originalSystemCursor);
+      originalSystemCursor = null;
+    } catch (error) {
+      cursorRestoreFailure = error;
+    }
+  }
   if (main) {
     await main.evaluate(`(async () => {
       await stopSession(false, true).catch(() => {});
       await window.desktop.hideBreakPrompt().catch(() => {});
       await window.desktopAPI.deleteSpeakerProfile().catch(() => {});
       await refreshSpeakerState().catch(() => {});
-      localStorage.removeItem('red-watch-study-settings-v1');
       await Promise.all((window.__testAudioContexts || []).map((context) => context.close().catch(() => {})));
       setTimeout(() => window.desktopAPI.quitApp(), 50);
       return true;
@@ -1937,4 +2504,5 @@ try {
   prompt?.close();
   main?.close();
   await removeIsolatedRoot(isolatedRoot);
+  if (cursorRestoreFailure) throw cursorRestoreFailure;
 }

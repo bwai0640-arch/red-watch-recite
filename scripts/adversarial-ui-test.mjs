@@ -366,7 +366,7 @@ try {
   }))()`);
   console.error('[adversarial] initial report', JSON.stringify(report.initial));
   assert(report.initial.session === '待命' && report.initial.startText === '开始学习', 'App does not open at 开始学习');
-  assert(report.initial.title === '背书自习监督', 'Product title was not renamed');
+  assert(report.initial.title === '凛冬督学局', 'Product title was not renamed');
   assert(report.initial.timer === '00:00', 'Initial timer is not zero');
   assert(report.initial.clip === 'E1_enter_walk' && report.initial.frame === '0' && report.initial.playback === 'held', 'Initial empty-room frame is wrong');
   assert(report.initial.alertHidden, 'Reminder is visible before Start');
@@ -453,17 +453,19 @@ try {
       const mono = SpeakerAudio.mixToMono(buffer);
       return buffer.sampleRate === 16000 ? mono : SpeakerAudio.resampleLinear(mono, buffer.sampleRate, 16000);
     };
-    await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollment = await window.desktopAPI.beginSpeakerEnrollment();
+    const enrollmentId = enrollment.enrollmentId;
     const names = [...Object.keys(encoded), ...Object.keys(encoded), ...Object.keys(encoded)].slice(0, 8);
     for (let index = 0; index < names.length; index += 1) {
       const samples = await decode(encoded[names[index]]);
       await window.desktopAPI.addSpeakerEnrollmentSample({
+        enrollmentId,
         source: 'mic',
         samples,
         sampleRate: 16000,
       });
     }
-    const profile = await window.desktopAPI.finishSpeakerEnrollment();
+    const profile = await window.desktopAPI.finishSpeakerEnrollment(enrollmentId);
     await refreshSpeakerState();
     await context.close();
     return { profile, rendererProfile: state.speakerProfileExists };
@@ -596,13 +598,12 @@ try {
       steadyNoise: true, speechScore: 0, voiceRatio: .5, flatness: .4, flux: .005
     });
     const realNow = Date.now;
-    let now = 100000;
-    Date.now = () => now;
+    Date.now = () => Number.MAX_SAFE_INTEGER;
     state.silenceArmed = true;
-    state.silentSince = 80001;
+    state.silentSince = monotonicNow() - violationLimitMs() + 100;
     pollMicrophone();
     const early = state.alertOpen;
-    now = 100001;
+    state.silentSince = monotonicNow() - violationLimitMs() - 100;
     pollMicrophone();
     const exact = state.alertOpen;
     window.__beishuTest.triggerSilenceViolation();
@@ -740,9 +741,11 @@ try {
     window.__canvasObserver?.disconnect();
     if (window.__originalClearRect) CanvasRenderingContext2D.prototype.clearRect = window.__originalClearRect;
     Promise.all((window.__testAudioContexts || []).map((context) => context.close().catch(() => {})));
-    window.desktopAPI.deleteSpeakerProfile().catch(() => {}).finally(() => {
-      setTimeout(() => window.desktopAPI.quitApp(), 50);
-    });
+    window.desktopAPI.getSpeakerState().then(async (profileState) => {
+      for (const profile of profileState?.profiles || []) {
+        await window.desktopAPI.deleteSpeakerProfile(profile.id).catch(() => {});
+      }
+    }).catch(() => {}).finally(() => setTimeout(() => window.desktopAPI.quitApp(), 50));
     return true;
   })()`).catch(() => {});
   await wait(500);

@@ -16,11 +16,13 @@ const MAX_SAMPLE_RATE = 96_000;
 const MIN_SAMPLE_SECONDS = 0.75;
 const MAX_SAMPLE_SECONDS = 15;
 const MAX_ABSOLUTE_SAMPLE = 1.25;
+const MAX_PROFILE_FILE_BYTES = 4 * 1024 * 1024;
 const ALLOWED_AUDIO_SOURCES = new Set(['mic']);
 const ENROLLMENT_CONSISTENCY_THRESHOLD = 0.50;
 const VERIFICATION_THRESHOLD = 0.55;
 const STRONG_MATCH_THRESHOLD = 0.70;
 const WORKER_TIMEOUT_MS = 30_000;
+const INFERENCE_TIMEOUT_MS = 4_500;
 
 class SpeakerServiceError extends Error {
   constructor(code, message, options = {}) {
@@ -210,16 +212,16 @@ class WorkerRpc {
     }
     this.pending.clear();
     this.onFatal?.(error);
+    this.worker.terminate().catch(() => {});
   }
 
-  request(method, payload = {}, transferList = []) {
+  request(method, payload = {}, transferList = [], timeoutMs = WORKER_TIMEOUT_MS) {
     if (this.closed) return Promise.reject(new SpeakerServiceError('WORKER_STOPPED', '声纹服务已经停止。'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new SpeakerServiceError('WORKER_TIMEOUT', '声纹处理超时。'));
-      }, WORKER_TIMEOUT_MS);
+        this.fail(new SpeakerServiceError('WORKER_TIMEOUT', '声纹处理超时。'));
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       try {
         this.worker.postMessage({ id, method, payload }, transferList);
@@ -258,6 +260,7 @@ class SpeakerService {
     this.fatalError = null;
     this.profileError = null;
     this.profile = null;
+    this.profileArtifactExists = fs.existsSync(this.profilePath);
     this.enrollment = null;
     this.initialization = null;
     this.operationQueue = Promise.resolve();
@@ -268,11 +271,13 @@ class SpeakerService {
     return {
       ready: Boolean(this.modelReady && this.storageReady && this.worker && !this.worker.closed),
       profileExists: profiles.length > 0,
+      profileArtifactExists: this.profileArtifactExists,
       createdAt: profiles[0]?.createdAt || null,
       profileCount: profiles.length,
       profiles: profiles.map(({ id, label, createdAt }) => ({ id, label, createdAt })),
       error: this.fatalError || this.profileError || null,
       enrolling: Boolean(this.enrollment),
+      enrollmentId: this.enrollment?.id || null,
       enrollmentCount: this.enrollment?.embeddings.length || 0,
       requiredSamples: MIN_ENROLLMENT_SAMPLES,
       threshold: VERIFICATION_THRESHOLD,
@@ -299,6 +304,7 @@ class SpeakerService {
         this.modelHash = await hashFile(this.modelPath);
         this.worker = new WorkerRpc(this.workerPath, this.modelPath, (error) => {
           this.modelReady = false;
+          this.enrollment = null;
           this.fatalError = publicError(error);
         });
         const info = await this.worker.request('getInfo');
@@ -330,6 +336,20 @@ class SpeakerService {
   assertOperational() {
     if (!this.modelReady || !this.storageReady || !this.worker || this.worker.closed) {
       throw new SpeakerServiceError('SERVICE_NOT_READY', this.fatalError || '声纹服务尚未就绪。');
+    }
+  }
+
+  requireEnrollment(payload = {}) {
+    const enrollmentId = String(payload?.enrollmentId || '');
+    if (!this.enrollment || !enrollmentId || this.enrollment.id !== enrollmentId) {
+      throw new SpeakerServiceError('ENROLLMENT_CANCELLED', '声纹录入已取消。');
+    }
+    return this.enrollment;
+  }
+
+  assertEnrollmentCurrent(enrollment) {
+    if (!enrollment || this.enrollment !== enrollment) {
+      throw new SpeakerServiceError('ENROLLMENT_CANCELLED', '声纹录入已取消。');
     }
   }
 
@@ -421,9 +441,26 @@ class SpeakerService {
     this.profileError = null;
     let encrypted;
     try {
+      const profileStat = await fsp.lstat(this.profilePath);
+      if (
+        !profileStat.isFile()
+        || profileStat.size < 1
+        || profileStat.size > MAX_PROFILE_FILE_BYTES
+      ) {
+        throw new SpeakerServiceError(
+          'PROFILE_SIZE_INVALID',
+          '声纹档案大小异常，请删除后重新录入。',
+        );
+      }
       encrypted = await fsp.readFile(this.profilePath);
+      this.profileArtifactExists = true;
     } catch (error) {
-      if (error.code === 'ENOENT') return;
+      if (error.code === 'ENOENT') {
+        this.profileArtifactExists = false;
+        return;
+      }
+      this.profileArtifactExists = true;
+      if (error instanceof SpeakerServiceError) throw error;
       throw new SpeakerServiceError('PROFILE_READ_FAILED', '声纹档案无法读取，请重新录入。', { cause: error });
     }
     try {
@@ -446,6 +483,7 @@ class SpeakerService {
       const requestedLabel = String(payload?.label || '').trim().replace(/\s+/gu, ' ').slice(0, 80);
       const number = (this.profile?.profiles.length || 0) + 1;
       this.enrollment = {
+        id: crypto.randomUUID(),
         startedAt: new Date().toISOString(),
         label: requestedLabel || `声纹 ${number}`,
         embeddings: [],
@@ -458,43 +496,44 @@ class SpeakerService {
   addEnrollmentSample(payload) {
     return this.runExclusive(async () => {
       this.assertOperational();
-      if (!this.enrollment) throw new SpeakerServiceError('ENROLLMENT_NOT_STARTED', '请先开始录入本人声音。');
-      if (this.enrollment.embeddings.length >= MAX_ENROLLMENT_SAMPLES) {
+      const enrollment = this.requireEnrollment(payload);
+      if (enrollment.embeddings.length >= MAX_ENROLLMENT_SAMPLES) {
         throw new SpeakerServiceError('TOO_MANY_SAMPLES', '录入片段数量已达到上限。');
       }
       const audio = validateAudioPayload(payload, { requireSource: true });
       const result = await this.worker.request('extract', {
         samples: audio.samples,
         sampleRate: audio.sampleRate,
-      }, [audio.samples.buffer]);
+      }, [audio.samples.buffer], INFERENCE_TIMEOUT_MS);
+      this.assertEnrollmentCurrent(enrollment);
       const embedding = Float32Array.from(result.embedding || []);
       if (embedding.length !== this.dimension) {
         throw new SpeakerServiceError('INVALID_EMBEDDING', '无法从声音片段生成有效声纹。');
       }
 
       let score;
-      if (this.enrollment.embeddings.length) {
-        score = cosineSimilarity(embedding, centroid(this.enrollment.embeddings));
+      if (enrollment.embeddings.length) {
+        score = cosineSimilarity(embedding, centroid(enrollment.embeddings));
       }
-      this.enrollment.embeddings.push(embedding);
-      this.enrollment.sources.push(audio.source);
+      enrollment.embeddings.push(embedding);
+      enrollment.sources.push(audio.source);
       return {
         source: audio.source,
-        count: this.enrollment.embeddings.length,
+        count: enrollment.embeddings.length,
         ...(Number.isFinite(score) ? { score } : {}),
       };
     });
   }
 
-  finishEnrollment() {
+  finishEnrollment(payload = {}) {
     return this.runExclusive(async () => {
       this.assertOperational();
-      if (!this.enrollment) throw new SpeakerServiceError('ENROLLMENT_NOT_STARTED', '尚未开始录入本人声音。');
-      if (this.enrollment.embeddings.length < MIN_ENROLLMENT_SAMPLES) {
+      const enrollment = this.requireEnrollment(payload);
+      if (enrollment.embeddings.length < MIN_ENROLLMENT_SAMPLES) {
         throw new SpeakerServiceError('NOT_ENOUGH_SAMPLES', `至少需要 ${MIN_ENROLLMENT_SAMPLES} 段清晰的本人声音。`);
       }
 
-      const selectedEmbeddings = selectConsistentEmbeddings(this.enrollment.embeddings);
+      const selectedEmbeddings = selectConsistentEmbeddings(enrollment.embeddings);
 
       const previousProfile = this.profile;
       const profile = {
@@ -507,33 +546,59 @@ class SpeakerService {
           ...(previousProfile?.profiles || []),
           {
             id: crypto.randomUUID(),
-            label: this.enrollment.label,
+            label: enrollment.label,
             createdAt: new Date().toISOString(),
             embeddings: selectedEmbeddings,
           },
         ],
       };
-      await this.worker.request('setProfiles', { profiles: this.workerProfiles(profile) });
-
       try {
-        await this.writeProfile(profile);
+        await this.worker.request('setProfiles', { profiles: this.workerProfiles(profile) });
+        this.assertEnrollmentCurrent(enrollment);
+        await this.writeProfile(profile, () => this.assertEnrollmentCurrent(enrollment));
+        this.assertEnrollmentCurrent(enrollment);
       } catch (error) {
-        if (previousProfile) {
-          await this.worker.request('setProfiles', { profiles: this.workerProfiles(previousProfile) }).catch(() => {});
-        } else {
-          await this.worker.request('clearProfile').catch(() => {});
+        let rollbackFailure = null;
+        try {
+          if (previousProfile) {
+            await this.worker.request('setProfiles', { profiles: this.workerProfiles(previousProfile) });
+          } else {
+            await this.worker.request('clearProfile');
+          }
+        } catch (rollbackError) {
+          rollbackFailure = rollbackError;
+          this.worker.fail(rollbackError);
+        }
+        if (error?.code === 'ENROLLMENT_CANCELLED') {
+          try {
+            if (previousProfile) await this.writeProfile(previousProfile);
+            else {
+              await fsp.rm(this.profilePath, { force: true });
+              this.profileArtifactExists = false;
+            }
+          } catch (diskRollbackError) {
+            rollbackFailure = rollbackFailure || diskRollbackError;
+            this.worker.fail(diskRollbackError);
+          }
+        }
+        if (rollbackFailure) {
+          throw new SpeakerServiceError(
+            'ENROLLMENT_ROLLBACK_FAILED',
+            '声纹录入取消后的安全回滚失败，声纹服务已停止。',
+            { cause: rollbackFailure },
+          );
         }
         throw error;
       }
 
       this.profile = profile;
       this.profileError = null;
-      this.enrollment = null;
+      if (this.enrollment === enrollment) this.enrollment = null;
       return this.getState();
     });
   }
 
-  async writeProfile(profile) {
+  async writeProfile(profile, assertCurrent = null) {
     const serialized = JSON.stringify({
       schemaVersion: profile.schemaVersion,
       modelHash: profile.modelHash,
@@ -550,7 +615,9 @@ class SpeakerService {
     let encrypted;
     try {
       encrypted = await this.profileCrypto.encryptString(serialized);
+      assertCurrent?.();
     } catch (error) {
+      if (error?.code === 'ENROLLMENT_CANCELLED') throw error;
       throw new SpeakerServiceError('PROFILE_ENCRYPT_FAILED', '声纹档案无法安全加密。', { cause: error });
     }
     const temporary = `${this.profilePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
@@ -561,17 +628,22 @@ class SpeakerService {
       await handle.sync();
       await handle.close();
       handle = null;
+      assertCurrent?.();
       await fsp.rename(temporary, this.profilePath);
+      assertCurrent?.();
+      this.profileArtifactExists = true;
     } catch (error) {
       await handle?.close().catch(() => {});
       await fsp.rm(temporary, { force: true }).catch(() => {});
+      if (error?.code === 'ENROLLMENT_CANCELLED') throw error;
       throw new SpeakerServiceError('PROFILE_WRITE_FAILED', '声纹档案无法保存到程序旁的数据目录。', { cause: error });
     }
   }
 
-  cancelEnrollment() {
+  cancelEnrollment(payload = {}) {
+    const enrollmentId = String(payload?.enrollmentId || '');
+    if (this.enrollment?.id === enrollmentId) this.enrollment = null;
     return this.runExclusive(async () => {
-      this.enrollment = null;
       return this.getState();
     });
   }
@@ -594,7 +666,7 @@ class SpeakerService {
           sampleRate: audio.sampleRate,
           threshold: VERIFICATION_THRESHOLD,
           strongThreshold: STRONG_MATCH_THRESHOLD,
-        }, [audio.samples.buffer]);
+        }, [audio.samples.buffer], INFERENCE_TIMEOUT_MS);
         return {
           matched: Boolean(result.matched),
           score: Number(result.score),
@@ -619,25 +691,73 @@ class SpeakerService {
     return this.runExclusive(async () => {
       this.assertOperational();
       this.enrollment = null;
-      if (!this.profile) return this.getState();
-      const removeAll = typeof profileId !== 'string' || !profileId;
-      const remaining = removeAll ? [] : this.profile.profiles.filter((item) => item.id !== profileId);
-      if (!removeAll && remaining.length === this.profile.profiles.length) {
+      if (typeof profileId !== 'string' || !/^[a-f0-9-]{8,64}$/iu.test(profileId)) {
+        throw new SpeakerServiceError('PROFILE_ID_INVALID', '请选择要删除的有效声纹。');
+      }
+      if (!this.profile) {
         throw new SpeakerServiceError('PROFILE_NOT_FOUND', '未找到要删除的声纹。');
       }
+      const remaining = this.profile.profiles.filter((item) => item.id !== profileId);
+      if (remaining.length === this.profile.profiles.length) {
+        throw new SpeakerServiceError('PROFILE_NOT_FOUND', '未找到要删除的声纹。');
+      }
+      const previousProfile = this.profile;
+      const nextProfile = remaining.length ? { ...previousProfile, profiles: remaining } : null;
+      if (nextProfile) {
+        await this.worker.request('setProfiles', { profiles: this.workerProfiles(nextProfile) });
+      } else {
+        await this.worker.request('clearProfile');
+      }
       try {
-        if (!remaining.length) {
-          await fsp.rm(this.profilePath, { force: true });
-        } else {
-          await this.writeProfile({ ...this.profile, profiles: remaining });
-        }
+        if (nextProfile) await this.writeProfile(nextProfile);
+        else await fsp.rm(this.profilePath, { force: true });
       } catch (error) {
+        try {
+          await this.worker.request('setProfiles', {
+            profiles: this.workerProfiles(previousProfile),
+          });
+        } catch (rollbackError) {
+          this.worker.fail(rollbackError);
+        }
         throw new SpeakerServiceError('PROFILE_DELETE_FAILED', '声纹档案无法删除。', { cause: error });
       }
-      this.profile = remaining.length ? { ...this.profile, profiles: remaining } : null;
+      this.profile = nextProfile;
+      this.profileArtifactExists = Boolean(nextProfile);
       this.profileError = null;
-      if (this.profile) await this.worker.request('setProfiles', { profiles: this.workerProfiles(this.profile) });
-      else await this.worker.request('clearProfile');
+      return this.getState();
+    });
+  }
+
+  deleteProfileArtifact() {
+    return this.runExclusive(async () => {
+      this.enrollment = null;
+      if (this.profile) {
+        throw new SpeakerServiceError(
+          'PROFILE_USABLE',
+          '声纹档案仍可正常使用，请通过声纹列表删除。',
+        );
+      }
+      try {
+        if (this.worker && !this.worker.closed) await this.worker.request('clearProfile');
+      } catch (error) {
+        this.worker?.fail(error);
+      }
+      try {
+        await fsp.rm(this.profilePath, { force: true });
+        const entries = await fsp.readdir(this.dataRoot).catch(() => []);
+        await Promise.all(entries
+          .filter((name) => /^speaker-profile\.dat\.tmp-\d+-[a-f0-9-]{8,64}$/iu.test(name))
+          .map((name) => fsp.rm(path.join(this.dataRoot, name), { force: true })));
+      } catch (error) {
+        throw new SpeakerServiceError(
+          'PROFILE_DELETE_FAILED',
+          '本地声纹档案无法删除。',
+          { cause: error },
+        );
+      }
+      this.profile = null;
+      this.profileArtifactExists = false;
+      this.profileError = null;
       return this.getState();
     });
   }
@@ -656,6 +776,7 @@ module.exports = {
   constants: Object.freeze({
     MIN_ENROLLMENT_SAMPLES,
     MAX_ENROLLMENT_SAMPLES,
+    MAX_PROFILE_FILE_BYTES,
     VERIFICATION_THRESHOLD,
     STRONG_MATCH_THRESHOLD,
   }),

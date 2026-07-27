@@ -1,5 +1,8 @@
 const assert = require('node:assert/strict');
-const { AdaptiveVoiceDetector } = require('../renderer/adaptive-vad.js');
+const {
+  AdaptiveVoiceDetector,
+  MAX_AUTOMATIC_NOISE_FLOOR_DB,
+} = require('../renderer/adaptive-vad.js');
 const { QuietModeDetector } = require('../renderer/study-policy.js');
 
 const FRAME_MS = 100;
@@ -76,6 +79,43 @@ for (let index = 0; index < 60; index += 1) {
 }
 assert.equal(changedFanSpeechFrames, 0, 'a fan speed change was classified as speech');
 assert.ok(changedFanResult.noiseFloorDb > -36, 'adaptive noise floor did not learn the changed fan level');
+
+// A learner may begin reciting immediately instead of staying quiet during the
+// automatic warmup. Those first three seconds must not poison the gate and keep
+// all later owner speech away from speaker verification.
+const contaminatedBySpeech = new AdaptiveVoiceDetector({ calibrationFrames: 30, sensitivityDb: 8 });
+const immediateSpeechPattern = [-32, -27, -30, -24, -29, -25];
+for (let index = 0; index < 30; index += 1) {
+  contaminatedBySpeech.process(frame(immediateSpeechPattern[index % immediateSpeechPattern.length], {
+    voiceRatio: 0.72,
+    flatness: 0.42,
+    flux: 0.10,
+  }));
+}
+assert.equal(contaminatedBySpeech.calibrated, true, 'speech-contaminated warmup never completed');
+assert.ok(
+  contaminatedBySpeech.noiseFloorDb <= MAX_AUTOMATIC_NOISE_FLOOR_DB,
+  'speech-contaminated warmup learned the learner voice as the noise floor',
+);
+const postContaminationSpeech = Array.from({ length: 3 }, (_, index) => contaminatedBySpeech.process(frame(
+  immediateSpeechPattern[index],
+  { voiceRatio: 0.72, flatness: 0.42, flux: 0.10 },
+)));
+assert.equal(
+  postContaminationSpeech.some((result) => result.isSpeech),
+  true,
+  'owner speech did not recover within 300 ms after a contaminated warmup',
+);
+
+// Quiet but spectrally clear speech may sit below the conservative level
+// margin. The strong voice-pattern bypass lets CAM++ make the final identity
+// decision while stable fan noise remains blocked above.
+const quietSpeechAfterContamination = contaminatedBySpeech.process(frame(-47, {
+  voiceRatio: 0.72,
+  flatness: 0.42,
+  flux: 0.10,
+}));
+assert.equal(quietSpeechAfterContamination.speechEvidence, true, 'quiet clear speech never reached speaker verification');
 
 function keyFrame(db = -24) {
   return frame(db, {
@@ -180,6 +220,8 @@ console.log(JSON.stringify({
   speechDetectedWithinFrames: speechResults.findIndex((result) => result.isSpeech) + 1,
   changedFanSpeechFrames,
   adaptedNoiseFloorDb: Number(changedFanResult.noiseFloorDb.toFixed(2)),
+  contaminatedWarmupRecoveredWithinFrames: postContaminationSpeech.findIndex((result) => result.isSpeech) + 1,
+  automaticNoiseFloorCeilingDb: MAX_AUTOMATIC_NOISE_FLOOR_DB,
   twoFrameKeyHangoverFrames: hangoverFrames,
   rapidKeyVadSpeechFrames,
   rapidKeyEvidenceFrames,

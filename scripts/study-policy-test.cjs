@@ -151,6 +151,85 @@ for (let index = 0; index < 79; index += 1) {
 }
 assert.equal(defaultDetector.process(rawSpeech).violated, true, 'default 8-second speech did not violate');
 
+const recoveryDetector = new QuietModeDetector({
+  violationSeconds: 3,
+  frameMs: 1_000,
+  evidenceGapSeconds: 5,
+  rearmQuietSeconds: 5,
+});
+assert.equal(recoveryDetector.process({ mediaEvidence: true }).suspectedSpeechMs, 1_000);
+assert.equal(recoveryDetector.process({ mediaEvidence: true }).suspectedSpeechMs, 2_000);
+for (let index = 1; index <= 4; index += 1) {
+  const held = recoveryDetector.process({ mediaEvidence: false });
+  assert.equal(held.suspectedSpeechMs, 2_000, `candidate cleared after only ${index} quiet second(s)`);
+  assert.equal(held.evidenceGapMs, index * 1_000);
+}
+assert.equal(
+  recoveryDetector.process({ mediaEvidence: true }).violated,
+  true,
+  'media resumed inside the recovery delay did not continue the original candidate',
+);
+for (let index = 1; index <= 4; index += 1) {
+  assert.equal(recoveryDetector.process({ mediaEvidence: false }).rearmed, false);
+}
+assert.equal(
+  recoveryDetector.process({ mediaEvidence: false }).rearmed,
+  true,
+  'detector rearmed before five continuous quiet seconds',
+);
+
+recoveryDetector.reset();
+recoveryDetector.process({ mediaEvidence: true });
+recoveryDetector.process({ mediaEvidence: true });
+for (let index = 1; index <= 4; index += 1) {
+  assert.equal(recoveryDetector.process({ mediaEvidence: false }).suspectedSpeechMs, 2_000);
+}
+const recovered = recoveryDetector.process({ mediaEvidence: false });
+assert.equal(recovered.suspectedSpeechMs, 0, 'five continuous quiet seconds did not clear the candidate');
+assert.equal(recovered.rawEvidenceMs, 0);
+assert.equal(recoveryDetector.process({ mediaEvidence: true }).suspectedSpeechMs, 1_000);
+
+// This sequence is taken from the CED decisions for the bundled eight-second
+// spoken intro: T,T,F,T,T,T,T. A strict detector can reset forever at the
+// isolated miss; the five-second recovery tolerance must preserve only the
+// positive evidence time and eventually reach the normal eight-second limit.
+const intermittentMediaSequence = [true, true, false, true, true, true, true];
+const strictIntermittentDetector = new QuietModeDetector({
+  violationSeconds: 8,
+  frameMs: 1_000,
+  evidenceOverlapSeconds: 1,
+});
+let strictIntermittentViolated = false;
+for (let index = 0; index < 210; index += 1) {
+  strictIntermittentViolated ||= strictIntermittentDetector.process({
+    mediaEvidence: intermittentMediaSequence[index % intermittentMediaSequence.length],
+  }).violated;
+}
+assert.equal(strictIntermittentViolated, false, 'control sequence no longer exercises the reset failure');
+
+const tolerantIntermittentDetector = new QuietModeDetector({
+  violationSeconds: 8,
+  frameMs: 1_000,
+  evidenceGapSeconds: 5,
+  evidenceOverlapSeconds: 1,
+  rearmQuietSeconds: 5,
+});
+let intermittentViolationWindow = -1;
+for (let index = 0; index < 21; index += 1) {
+  const result = tolerantIntermittentDetector.process({
+    mediaEvidence: intermittentMediaSequence[index % intermittentMediaSequence.length],
+  });
+  if (result.violated) {
+    intermittentViolationWindow = index + 1;
+    break;
+  }
+}
+assert.equal(
+  intermittentViolationWindow,
+  11,
+  'isolated classifier misses prevented an intermittent video from reaching the threshold',
+);
+
 const sensitivityDetector = new QuietModeDetector({ violationSeconds: 3, sensitivityDb: 999 });
 assert.equal(sensitivityDetector.sensitivityDb, 16);
 assert.equal(sensitivityDetector.process({ ...rawSpeech, levelDb: -26.1 }).evidence, false);
@@ -167,6 +246,7 @@ console.log(JSON.stringify({
   reciteMilestonesSettled: reciteLedger.snapshot(),
   studyMilestonesAt60Minutes: events.map((event) => event.type),
   quietDefaultViolationSeconds: defaultDetector.snapshot().violationSeconds,
+  intermittentVideoViolationWindow: intermittentViolationWindow,
   keyboardHangoverIgnored: true,
   thresholdsClamped: true,
 }));

@@ -2,7 +2,7 @@
 
 ## 项目身份
 
-“背书自习监督”是非官方本地二创桌面应用，不代表 `redwatch.top`、原作者或任何相关权利人的官方发行或认可。
+“凛冬督学局”是非官方本地二创桌面应用，不代表 `redwatch.top`、原作者或任何相关权利人的官方发行或认可。
 
 - 原作：叛逆蓝牙
 - 本二创：眼泪斷了线
@@ -11,7 +11,7 @@
 
 ## 拟公开的 GitHub 范围
 
-公开仓库包含源码、媒体、图标和 CAM++ 模型；根目录 `.gitignore` 阻止以下内容被首次加入：
+公开仓库包含源码、媒体、图标、CAM++ 模型和 CED Mini 音频事件模型；根目录 `.gitignore` 阻止以下内容被首次加入：
 
 - `dist/`、`release-staging/` 和其他本地发布产物；
 - 所有 `RedWatchReciteData/`、声纹档案、真实 `.env`、日志与缓存；
@@ -35,14 +35,18 @@ manifest 哈希只用于证明本地文件完整性，不表示本项目为原�
 
 公开仓库准备包含 `assets/icon.ico` 与 `assets/icon.png`。图标同样适用本页的非官方声明、权利归属与联系删除规则。
 
-## 声纹模型与软件
+## 本地模型与软件
 
 - `sherpa-onnx-node` 1.13.4：Apache License 2.0。
 - CAM++ 模型 `3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx`：项目记录为 Apache License 2.0。
 - 模型 SHA-256：`aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2`。
+- CED Mini 转换包来自 k2-fsa/sherpa-onnx 的 `sherpa-onnx-ced-mini-audio-tagging-2024-04-19.tar.bz2`；随包 README 只说明模型转换自 RicherMans/CED，没有给出该转换 ONNX 的逐文件许可证或精确上游 checkpoint。
+- CED Mini `model.int8.onnx` SHA-256：`ff29f39f9fbe637f72535160e9d006d61d872fdab0fce838672265b9b38cf946`；`class_labels_indices.csv` SHA-256：`cdd1049833c4b86127c2773ac0d14a2754b6a6d0d1798002ed5c66e699708429`。
 - Electron 43.1.0：MIT License；其 Chromium 等第三方组件由 Electron 随附声明覆盖。
 
-声纹软件与模型的随包声明见根目录 `THIRD_PARTY_NOTICES.md`，Apache License 2.0 全文见 `LICENSES/Apache-2.0.txt`。Electron/Chromium 和其他传递依赖的完整随包声明仍须在公开二进制发布前逐项核对。
+CED 相关页面的许可声明必须分开理解：RicherMans/CED 参考代码仓库标为 GPL-3.0；`mispeech/ced-mini` 模型卡标为 Apache-2.0；发布原始预训练权重的 Zenodo CED 记录标为 CC BY 4.0；Google 的 AudioSet 数据集标注为 CC BY 4.0、ontology 为 CC BY-SA 4.0。当前没有证据足以证明这些声明中的哪一项精确覆盖 k2-fsa 转换包里的 `model.int8.onnx`，因此本项目不把该转换文件写成“许可已明确”。公开二进制分发前应向转换包维护者或上游权利人核对 checkpoint 及再分发条件。
+
+本地软件与模型的随包声明见根目录 `THIRD_PARTY_NOTICES.md`，Apache License 2.0 全文见 `LICENSES/Apache-2.0.txt`。Electron/Chromium 和其他传递依赖的完整随包声明仍须在公开二进制发布前逐项核对。
 
 ## 测试语音
 
@@ -50,10 +54,12 @@ manifest 哈希只用于证明本地文件完整性，不表示本项目为原�
 
 不要把这些测试语音打包、公开上传或当作用户录音。需要公开测试仓库时，应先替换为有明确许可的合成或自有测试语料。
 
+CED Mini 发布门禁另行读取临时的 sherpa-onnx 官方媒体 WAV 与来源明确的真实键盘 WAV，用于验证“键盘单独放行、键盘与媒体混音仍检出”。这些 fixture 不属于运行资源，不提交 Git、不进入 `package.json` 打包列表、不复制到 `release-staging` 或用户数据目录。
+
 ## 公开分发前必须完成
 
 1. README、应用界面和本页保持“原作：叛逆蓝牙 · 二创：眼泪斷了线”署名、非官方声明及 GitHub Issue 联系删除方式。
 2. 本地真人测试语音继续排除；如需公开测试语料，应替换为有明确来源的合成或自有素材。
-3. 核对 Apache-2.0、Electron 与所有传递依赖的 NOTICE/许可证随包要求。
+3. 核对 Apache-2.0、Electron 与所有传递依赖的 NOTICE/许可证随包要求；在 CED Mini 转换包 checkpoint 与许可得到明确确认前，不得把其 ONNX 许可写成确定结论。
 4. 首次提交前检查实际暂存文件和敏感信息扫描结果；公开 EXE 前单独审查二进制所包含的文件。
 5. 除非维护者明确决定向公众授予额外权利，否则保持 `license: UNLICENSED`，不要随意添加开源许可证。

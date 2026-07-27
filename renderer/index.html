@@ -4,13 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#160c0b" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
-    <title>背书自习监督</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' rwt: data: blob:; base-uri 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; script-src 'self' rwt:; worker-src 'self' rwt: blob:; style-src 'self' rwt: 'unsafe-inline'; img-src 'self' rwt: data: blob:; connect-src 'self' rwt:; media-src 'self' rwt: blob:;" />
+    <title>凛冬督学局</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body class="scene-mode" data-window-mode="scene" data-vad-state="stopped">
     <header id="window-titlebar" class="window-titlebar" aria-label="窗口标题栏">
-      <div class="window-title">背书自习监督</div>
+      <div class="window-title">凛冬督学局</div>
       <div class="window-controls" aria-label="窗口控制">
         <button id="window-minimize-button" class="window-control" type="button" aria-label="最小化窗口" title="最小化">
           <i class="window-glyph minimize" aria-hidden="true"></i>
@@ -23,6 +23,17 @@
         </button>
       </div>
     </header>
+
+    <section id="floating-statusbar" class="floating-statusbar" aria-label="后台学习状态">
+      <div class="floating-status-copy">
+        <output id="floating-voice-state" class="floating-voice-state" aria-live="polite">未检测</output>
+      </div>
+    </section>
+    <div class="floating-hover-tools" aria-label="漂浮窗操作">
+      <output id="floating-timer" class="floating-timer" aria-label="本次有效学习时长">已学习 00:00</output>
+      <button id="floating-hide-button" class="floating-action" type="button" aria-label="完全隐藏窗口">隐藏</button>
+      <button id="floating-expand-button" class="floating-action" type="button" aria-label="放大窗口">放大</button>
+    </div>
 
     <section id="study-scene" class="study-scene" aria-label="督学动画场景">
       <canvas id="study-scene-canvas"></canvas>
@@ -65,7 +76,7 @@
     <main class="shell">
       <header class="masthead">
         <div class="masthead-copy">
-          <h1>背书自习监督 <span id="mode-title">· 背书模式</span></h1>
+          <h1>凛冬督学局 <span id="mode-title">· 背书模式</span></h1>
           <p class="creator-credit">原作：叛逆蓝牙 · 二创：眼泪斷了线</p>
         </div>
         <div class="mode-switch" role="group" aria-label="学习模式">
@@ -84,7 +95,13 @@
           <button id="start-button" class="button primary" disabled>正在准备场景…</button>
           <button id="stop-button" class="button secondary" disabled>结束本次背书</button>
           <button id="break-button" class="button secondary" disabled>休息（0）</button>
-          <button id="background-button" class="button secondary" disabled>隐藏到后台</button>
+          <div id="background-action" class="background-action">
+            <button id="background-button" class="button secondary" type="button" aria-controls="background-action-menu" aria-expanded="false" disabled>隐藏到后台</button>
+            <div id="background-action-menu" class="background-action-menu" role="group" aria-label="后台显示方式" aria-hidden="true">
+              <button id="background-choice-hidden" class="background-action-choice active" type="button" aria-pressed="true" disabled>完全隐藏</button>
+              <button id="background-choice-floating" class="background-action-choice" type="button" aria-pressed="false" disabled>使用漂浮窗</button>
+            </div>
+          </div>
           <button id="controls-button" class="button secondary">展开检测面板</button>
           <button id="exit-button" class="button secondary">退出程序</button>
         </div>
@@ -96,7 +113,6 @@
           </div>
           <div id="live-meter" class="meter compact-meter" role="meter" aria-label="实时麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
             <div id="live-volume-bar" class="volume-bar"></div>
-            <i id="live-volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="粗调检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键粗调检测门槛"></i>
           </div>
         </div>
       </section>
@@ -110,10 +126,11 @@
             <span id="voice-state" class="chip">未开启</span>
           </div>
           <div class="meter-wrap">
-            <div class="meter-labels"><span>环境底噪</span><span>本人声音</span></div>
+            <div class="meter-labels">
+              <span>较轻</span><span>较响</span>
+            </div>
             <div class="meter" role="meter" aria-label="麦克风音量" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
               <div id="volume-bar" class="volume-bar"></div>
-              <i id="volume-threshold" class="threshold-marker" role="slider" tabindex="0" aria-label="调整检测门槛" aria-valuemin="4" aria-valuemax="18" aria-valuenow="8" aria-valuetext="底噪 + 8 dB" title="拖动或使用方向键调整检测门槛"></i>
             </div>
           </div>
           <p id="voice-status" class="status-copy">未在检测声音</p>
@@ -125,10 +142,6 @@
             <label class="study-only" hidden>
               持续出声提醒 <output id="study-voice-limit-value">8 秒</output>
               <input id="study-voice-limit-input" type="range" min="3" max="15" step="1" value="8" />
-            </label>
-            <label>
-              <span id="voice-threshold-label">抗噪幅度</span> <output id="voice-threshold-value">底噪 + 8 dB</output>
-              <input id="voice-threshold-input" type="range" min="4" max="18" step="1" value="8" />
             </label>
             <div class="microphone-row">
               <label for="microphone-select">麦克风</label>
@@ -144,6 +157,13 @@
               <button id="preflight-test-button" class="button secondary" type="button">测试当前设置</button>
               <p id="preflight-test-status" role="status" aria-live="polite">只检测，不计时、不提醒。</p>
             </div>
+            <div class="background-mode-row">
+              <span>后台显示</span>
+              <div class="background-mode-options" role="group" aria-label="选择后台显示方式">
+                <button id="background-mode-hidden" class="compact-option active" type="button" aria-pressed="true">完全隐藏</button>
+                <button id="background-mode-floating" class="compact-option" type="button" aria-pressed="false">漂浮窗</button>
+              </div>
+            </div>
             <div class="speaker-profile-row recite-only">
               <span id="speaker-profile-state" class="chip">正在加载声纹模型…</span>
               <div class="speaker-profile-actions">
@@ -152,7 +172,6 @@
                 <button id="speaker-delete-button" class="button secondary" hidden>删除声纹</button>
               </div>
             </div>
-            <button id="recalibrate-button" class="button secondary" disabled>重新校准环境底噪</button>
           </div>
         </article>
       </section>
